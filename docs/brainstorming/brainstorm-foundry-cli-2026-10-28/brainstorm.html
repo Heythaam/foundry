@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Foundry -- Brainstorm Session -- 2026-10-28</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@300;400;600&display=swap');
+
+  :root {
+    --bg: #0d0b0a;
+    --bg-raised: #1a1614;
+    --bg-card: #211d1a;
+    --amber: #e8872b;
+    --amber-glow: #f5a623;
+    --molten: #ff6a1a;
+    --white-hot: #ffe4b5;
+    --steel: #c4bdb6;
+    --ash: #7a726b;
+    --text: #e8e0d8;
+    --text-dim: #9e958c;
+    --coach: #d4a574;
+    --user: #8bb8d0;
+    --border: #2e2824;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f0eb;
+      --bg-raised: #ebe4dc;
+      --bg-card: #e0d8cf;
+      --text: #1a1614;
+      --text-dim: #5a524a;
+      --steel: #3a342e;
+      --ash: #6a625a;
+      --border: #cdc4ba;
+      --coach: #8b5e2f;
+      --user: #2a6a8a;
+    }
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    font-weight: 300;
+    line-height: 1.7;
+    overflow-x: hidden;
+  }
+
+  /* --- SPARKS CANVAS --- */
+  #sparks {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.4;
+  }
+
+  .content { position: relative; z-index: 1; }
+
+  /* --- HERO --- */
+  .hero {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 2rem;
+    position: relative;
+  }
+
+  .hero::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 200px;
+    background: linear-gradient(transparent, var(--bg));
+  }
+
+  .hero-anvil {
+    font-size: clamp(4rem, 12vw, 10rem);
+    font-family: 'Playfair Display', serif;
+    font-weight: 900;
+    letter-spacing: -0.03em;
+    background: linear-gradient(180deg, var(--white-hot) 0%, var(--amber) 40%, var(--molten) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    line-height: 1;
+    animation: heatPulse 4s ease-in-out infinite;
+  }
+
+  @keyframes heatPulse {
+    0%, 100% { filter: brightness(1); }
+    50% { filter: brightness(1.15); }
+  }
+
+  .hero-subtitle {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: clamp(0.75rem, 2vw, 1rem);
+    color: var(--ash);
+    margin-top: 1rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+
+  .hero-date {
+    font-family: 'IBM Plex Mono', monospace;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    margin-top: 2rem;
+    opacity: 0.6;
+  }
+
+  .hero-stats {
+    display: flex;
+    gap: 2rem;
+    margin-top: 3rem;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .stat {
+    text-align: center;
+  }
+
+  .stat-num {
+    font-family: 'Playfair Display', serif;
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: var(--amber);
+  }
+
+  .stat-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--ash);
+  }
+
+  /* --- SECTIONS --- */
+  section {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 4rem 1.5rem;
+  }
+
+  .section-header {
+    margin-bottom: 3rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .section-num {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--amber);
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+  }
+
+  .section-title {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(1.8rem, 4vw, 2.8rem);
+    font-weight: 700;
+    margin-top: 0.25rem;
+    color: var(--text);
+  }
+
+  .section-desc {
+    color: var(--text-dim);
+    margin-top: 0.5rem;
+    font-size: 0.95rem;
+  }
+
+  /* --- IDEA CARDS --- */
+  .idea {
+    background: var(--bg-card);
+    border-left: 3px solid var(--border);
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1rem;
+    border-radius: 0 4px 4px 0;
+    transition: border-color 0.3s, transform 0.2s;
+  }
+
+  .idea:hover {
+    transform: translateX(4px);
+  }
+
+  .idea.coach { border-left-color: var(--coach); }
+  .idea.user  { border-left-color: var(--user); }
+
+  .idea-author {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 0.4rem;
+  }
+
+  .idea.coach .idea-author { color: var(--coach); }
+  .idea.user  .idea-author { color: var(--user); }
+
+  .idea-text {
+    font-size: 0.95rem;
+  }
+
+  /* --- SCAMPER special: alternating sides --- */
+  .scamper-grid {
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  .scamper-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.65rem;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin-top: 1.5rem;
+    margin-bottom: 0.5rem;
+    padding-left: 1.5rem;
+    position: relative;
+  }
+
+  .scamper-label::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 8px;
+    height: 2px;
+    background: var(--amber);
+  }
+
+  /* --- CHAOS: glitch treatment --- */
+  .chaos-section {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2rem;
+    margin-bottom: 1rem;
+  }
+
+  .chaos-section .idea {
+    background: transparent;
+    border-left-color: #c0392b;
+    padding-left: 1.25rem;
+  }
+
+  .chaos-section .idea.user { border-left-color: var(--user); }
+  .chaos-section .idea.coach { border-left-color: #c0392b; }
+
+  .chaos-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.65rem;
+    color: #c0392b;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    margin-bottom: 0.75rem;
+  }
+
+  .insight-card {
+    background: linear-gradient(135deg, var(--bg-card), var(--bg-raised));
+    border: 1px solid var(--amber);
+    border-radius: 4px;
+    padding: 1.25rem 1.5rem;
+    margin: 1.25rem 0;
+    position: relative;
+  }
+
+  .insight-card::before {
+    content: 'PRINCIPLE';
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.6rem;
+    letter-spacing: 0.3em;
+    color: var(--amber);
+    position: absolute;
+    top: -0.5rem;
+    left: 1rem;
+    background: var(--bg);
+    padding: 0 0.5rem;
+  }
+
+  .insight-text {
+    color: var(--white-hot);
+    font-weight: 400;
+  }
+
+  /* --- KILL CROWN JEWEL: shattered card --- */
+  .crown-section {
+    position: relative;
+  }
+
+  .crown-reveal {
+    background: var(--bg-raised);
+    border: 2px solid var(--amber-glow);
+    border-radius: 6px;
+    padding: 2rem;
+    margin: 2rem 0;
+    text-align: center;
+    box-shadow: 0 0 40px rgba(232, 135, 43, 0.08);
+  }
+
+  .crown-reveal-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--amber);
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    margin-bottom: 0.75rem;
+  }
+
+  .crown-reveal-text {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.3rem;
+    color: var(--white-hot);
+    line-height: 1.5;
+  }
+
+  /* --- UTOPIA/DYSTOPIA split --- */
+  .split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin: 1.5rem 0;
+  }
+
+  @media (max-width: 600px) {
+    .split { grid-template-columns: 1fr; }
+  }
+
+  .split-utopia, .split-dystopia {
+    padding: 1.5rem;
+    border-radius: 4px;
+  }
+
+  .split-utopia {
+    background: linear-gradient(180deg, rgba(139, 184, 208, 0.08), transparent);
+    border: 1px solid rgba(139, 184, 208, 0.2);
+  }
+
+  .split-dystopia {
+    background: linear-gradient(180deg, rgba(192, 57, 43, 0.08), transparent);
+    border: 1px solid rgba(192, 57, 43, 0.2);
+  }
+
+  .split-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.65rem;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    margin-bottom: 1rem;
+  }
+
+  .split-utopia .split-label { color: var(--user); }
+  .split-dystopia .split-label { color: #c0392b; }
+
+  /* --- PRINCIPLES STAMP --- */
+  .principles-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1rem;
+    margin: 2rem 0;
+  }
+
+  .stamp {
+    border: 2px solid var(--amber);
+    padding: 1.5rem;
+    text-align: center;
+    position: relative;
+    transform: rotate(calc(var(--r, 0) * 1deg));
+    transition: transform 0.3s;
+  }
+
+  .stamp:hover {
+    transform: rotate(0deg) scale(1.03);
+  }
+
+  .stamp-num {
+    font-family: 'Playfair Display', serif;
+    font-size: 2rem;
+    color: var(--amber);
+    opacity: 0.3;
+    position: absolute;
+    top: 0.25rem;
+    right: 0.75rem;
+  }
+
+  .stamp-text {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--white-hot);
+    line-height: 1.5;
+  }
+
+  /* --- MOSCOW FORGE --- */
+  .moscow-tier {
+    margin-bottom: 2rem;
+  }
+
+  .moscow-label {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .moscow-bar {
+    flex: 1;
+    height: 2px;
+    background: var(--border);
+  }
+
+  .moscow-must .moscow-label { color: var(--molten); }
+  .moscow-should .moscow-label { color: var(--amber); }
+  .moscow-could .moscow-label { color: var(--ash); }
+  .moscow-wont .moscow-label { color: var(--text-dim); }
+
+  .moscow-items {
+    list-style: none;
+    padding-left: 0;
+  }
+
+  .moscow-items li {
+    padding: 0.5rem 0 0.5rem 1.5rem;
+    position: relative;
+    font-size: 0.95rem;
+    color: var(--steel);
+  }
+
+  .moscow-items li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+
+  .moscow-must .moscow-items li::before { background: var(--molten); box-shadow: 0 0 8px var(--molten); }
+  .moscow-should .moscow-items li::before { background: var(--amber); }
+  .moscow-could .moscow-items li::before { background: var(--ash); }
+  .moscow-wont .moscow-items li::before { background: var(--text-dim); opacity: 0.4; }
+
+  .moscow-override {
+    background: var(--bg-raised);
+    border-left: 3px solid var(--molten);
+    padding: 1rem 1.25rem;
+    margin-top: 1.5rem;
+    font-style: italic;
+    color: var(--amber-glow);
+    font-size: 0.9rem;
+  }
+
+  /* --- SYNTHESIS CLIMAX --- */
+  .synthesis {
+    background: linear-gradient(180deg, var(--bg-raised), var(--bg));
+    border-top: 2px solid var(--amber);
+    padding: 4rem 1.5rem;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+
+  .through-line {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(1.4rem, 3vw, 2rem);
+    color: var(--white-hot);
+    text-align: center;
+    margin: 2rem 0 3rem;
+    line-height: 1.5;
+  }
+
+  .connection {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+    align-items: flex-start;
+  }
+
+  .connection-icon {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--amber);
+    background: var(--bg-card);
+    border: 1px solid var(--amber);
+    padding: 0.25rem 0.5rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+    margin-top: 0.2rem;
+  }
+
+  .connection-text {
+    color: var(--steel);
+    font-size: 0.95rem;
+  }
+
+  /* --- FOOTER --- */
+  .footer {
+    text-align: center;
+    padding: 4rem 1rem 2rem;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--ash);
+    letter-spacing: 0.15em;
+  }
+
+  /* --- SCROLL REVEAL --- */
+  .reveal {
+    opacity: 0;
+    transform: translateY(30px);
+    transition: opacity 0.8s ease, transform 0.8s ease;
+  }
+
+  .reveal.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  /* --- DIVIDER --- */
+  .forge-divider {
+    text-align: center;
+    margin: 4rem auto;
+    max-width: 900px;
+    padding: 0 1.5rem;
+    position: relative;
+  }
+
+  .forge-divider::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 1.5rem;
+    right: 1.5rem;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--amber), transparent);
+    opacity: 0.3;
+  }
+
+  .forge-divider span {
+    background: var(--bg);
+    padding: 0 1rem;
+    position: relative;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--ash);
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="sparks"></canvas>
+
+<div class="content">
+
+  <!-- HERO -->
+  <header class="hero">
+    <div class="hero-anvil">FOUNDRY</div>
+    <div class="hero-subtitle">Forging software from raw ideas</div>
+    <div class="hero-date">Brainstorm Session / 2026-10-28</div>
+    <div class="hero-stats">
+      <div class="stat"><div class="stat-num">22</div><div class="stat-label">Ideas</div></div>
+      <div class="stat"><div class="stat-num">6</div><div class="stat-label">Insights</div></div>
+      <div class="stat"><div class="stat-num">6</div><div class="stat-label">Principles</div></div>
+      <div class="stat"><div class="stat-num">4</div><div class="stat-label">Techniques</div></div>
+    </div>
+  </header>
+
+  <!-- TECHNIQUE 1: SCAMPER -->
+  <section>
+    <div class="section-header reveal">
+      <div class="section-num">Technique I</div>
+      <div class="section-title">SCAMPER Method</div>
+      <div class="section-desc">Systematic mutation of the core concept -- substitute, combine, adapt, modify, put to other use, eliminate, reverse.</div>
+    </div>
+
+    <div class="scamper-grid">
+      <div class="scamper-label">Substitute</div>
+      <div class="idea coach reveal"><div class="idea-author">Coach</div><div class="idea-text">Substitute Claude Code SDK for provider-agnostic agent slot interface -- builder agent becomes pluggable (Cursor, Aider, Codex CLI, Ollama).</div></div>
+      <div class="idea user reveal"><div class="idea-author">User</div><div class="idea-text">Substitute CLI prompt checkpoints for local web UI -- Foundry spins up a server, opens browser for reviewing/editing docs with rich text, terminal stays for progress streaming.</div></div>
+
+      <div class="scamper-label">Combine</div>
+      <div class="idea coach reveal"><div class="idea-author">Coach</div><div class="idea-text">Combine checkpoint UI with live project dashboard -- browser tab stays open whole run, shows doc editor during planning, CI-style view during build, approve button lives next to context.</div></div>
+      <div class="idea user reveal"><div class="idea-author">User</div><div class="idea-text">Combine forge.log with git history -- every Foundry decision is a structured commit message, git log IS the forge.log, repo tells full story of how it was built.</div></div>
+
+      <div class="scamper-label">Adapt</div>
+      <div class="idea coach reveal"><div class="idea-author">Coach</div><div class="idea-text">Adapt IaC pattern: foundry.yaml as declarative process spec -- describes the pipeline not just the output, forkable/reproducible project genesis.</div></div>
+      <div class="idea user reveal"><div class="idea-author">User</div><div class="idea-text">Adapt database migration pattern: foundry.lock records exact prompt versions, model versions, agent versions, response hashes -- replayable, diffable, re-runnable per phase.</div></div>
+
+      <div class="scamper-label">Modify</div>
+      <div class="idea coach reveal"><div class="idea-author">Coach</div><div class="idea-text">Modify linear pipeline into DAG with backtracking -- foundry rewind --to prd preserves history, re-derives downstream, git captures both paths.</div></div>
+      <div class="idea user reveal"><div class="idea-author">User</div><div class="idea-text">Modify retry loop to escalate-to-human: auto-retry once, then pause with full context in checkpoint UI, human can edit story/code/skip, intervention logged in foundry.lock as hint for future runs.</div></div>
+
+      <div class="scamper-label">Put to Other Use</div>
+      <div class="idea coach reveal"><div class="idea-author">Coach</div><div class="idea-text">Teaching tool -- students run Foundry on an assignment, then critique every AI decision using the git log and foundry.lock as case study material.</div></div>
+      <div class="idea user reveal"><div class="idea-author">User</div><div class="idea-text">Technical interview tool -- candidate runs Foundry with all checkpoints manual, interviewers evaluate engineering judgment not coding speed, foundry.lock becomes review artifact.</div></div>
+
+      <div class="scamper-label">Eliminate</div>
+      <div class="idea coach reveal"><div class="idea-author">Coach</div><div class="idea-text">Eliminate GitHub repo creation from pipeline -- build locally, export as tarball/repo/zip/docker at the end, repo is distribution format not build artifact, works offline.</div></div>
+      <div class="idea user reveal"><div class="idea-author">User</div><div class="idea-text">Eliminate deployment target as Foundry concern -- output Dockerfile + health check + ports declaration as universal interface, where it runs is not Foundry's problem.</div></div>
+
+      <div class="scamper-label">Reverse</div>
+      <div class="idea coach reveal"><div class="idea-author">Coach</div><div class="idea-text">Reverse direction: foundry reverse inspects running app or codebase and generates brainstorm/PRD/architecture/epics that would have produced it -- reverse-engineers intent from implementation.</div></div>
+      <div class="idea user reveal"><div class="idea-author">User</div><div class="idea-text">Reverse approval flow: human authors PRD/arch first, Foundry adapts to it -- foundry build --from-prd, AI fills gaps and flags ambiguities instead of proposing, slots into existing team workflows.</div></div>
+    </div>
+  </section>
+
+  <div class="forge-divider"><span>Anvil Strike</span></div>
+
+  <!-- TECHNIQUE 2: CHAOS ENGINEERING -->
+  <section>
+    <div class="section-header reveal">
+      <div class="section-num">Technique II</div>
+      <div class="section-title">Chaos Engineering</div>
+      <div class="section-desc">Injecting failure into the forge. What breaks when the fire goes out mid-pour?</div>
+    </div>
+
+    <div class="chaos-section reveal">
+      <div class="chaos-label">Failure: Hallucinated Dependency</div>
+      <div class="idea coach"><div class="idea-author">Coach</div><div class="idea-text">LLM hallucinates nonexistent dependency, mocks hide it, Dockerfile fails -- need verify-deps step between architecture approval and implementation.</div></div>
+    </div>
+
+    <div class="chaos-section reveal">
+      <div class="chaos-label">Failure: Inconsistent PRD</div>
+      <div class="idea user"><div class="idea-author">User</div><div class="idea-text">Human approves internally inconsistent PRD, Foundry builds it faithfully but wrong -- need contradiction detector as hard stop before architecture, resolution logged as first-class decision.</div></div>
+    </div>
+
+    <div class="chaos-section reveal">
+      <div class="chaos-label">Failure: Model Drift</div>
+      <div class="idea coach"><div class="idea-author">Coach</div><div class="idea-text">Model version changes mid-run after crash/resume, codebase has style uncanny valley -- need model pinning in foundry.lock or post-build consistency pass.</div></div>
+      <div class="idea user" style="margin-top:0.75rem"><div class="idea-author">User</div><div class="idea-text">Pin model version + human override at resume: continue with same model or switch and add mandatory consistency pass as final epic, model identity is first-class build parameter like compiler version.</div></div>
+    </div>
+
+    <div class="insight-card reveal">
+      <div class="insight-text">Model identity is a first-class build parameter -- Foundry should never silently switch models mid-run.</div>
+    </div>
+
+    <div class="chaos-section reveal">
+      <div class="chaos-label">Failure: Information Loss Between Stages</div>
+      <div class="idea coach"><div class="idea-author">Coach</div><div class="idea-text">Brainstorm has 13 dirs, PRD silently covers 9 -- need traceability matrix with explicit mapping between stages, human decides what to drop.</div></div>
+    </div>
+
+    <div class="chaos-section reveal">
+      <div class="chaos-label">Failure: Infrastructure Conflation</div>
+      <div class="idea user"><div class="idea-author">User</div><div class="idea-text">GitHub rate limit mid-run, retry loop treats infra failure as code failure, LLM corrupts working code -- need 3 failure categories: code (LLM fixes), infra (pause+wait), environment (hard stop).</div></div>
+    </div>
+
+    <div class="insight-card reveal">
+      <div class="insight-text">External failure is the normal case not the edge case -- Foundry talks to 4+ services and must treat partial outages as routine.</div>
+    </div>
+  </section>
+
+  <div class="forge-divider"><span>Quench</span></div>
+
+  <!-- TECHNIQUE 3: KILL THE CROWN JEWEL -->
+  <section class="crown-section">
+    <div class="section-header reveal">
+      <div class="section-num">Technique III</div>
+      <div class="section-title">Kill the Crown Jewel</div>
+      <div class="section-desc">What if BMad planning -- the centerpiece -- was ripped out? What survives?</div>
+    </div>
+
+    <div class="idea user reveal"><div class="idea-author">User</div><div class="idea-text">Kill BMad planning reveals product split: Foundry Pro (full pipeline) vs Foundry Quick (skip to code, vibe coding with guardrails) -- shared engine, lock file, CI/CD.</div></div>
+
+    <div class="crown-reveal reveal">
+      <div class="crown-reveal-label">The Real Crown Jewel</div>
+      <div class="crown-reveal-text">The crown jewel is foundry.lock + structured git history, not BMad. Provenance and traceability are what make it Foundry. BMad is the most powerful mode, not the only one.</div>
+    </div>
+
+    <div class="idea user reveal"><div class="idea-author">User</div><div class="idea-text">Minimum viable Foundry Quick: (1) self-written spec as first checkpoint, (2) incremental logical commits not file dump, (3) tests non-negotiable before commit -- these three separate it from raw LLM.</div></div>
+
+    <div class="insight-card reveal">
+      <div class="insight-text">Core Foundry value proposition: structure (explicit contract), incrementality (navigable history), verification (tests required) -- not the planning brain, not the deployment.</div>
+    </div>
+
+    <div class="insight-card reveal">
+      <div class="insight-text">Build strategy: Foundry Quick is the MVP shipped first -- proves core value without BMad dependency, Foundry Pro adds planning on top.</div>
+    </div>
+  </section>
+
+  <div class="forge-divider"><span>Temper</span></div>
+
+  <!-- TECHNIQUE 4: UTOPIA VS DYSTOPIA -->
+  <section>
+    <div class="section-header reveal">
+      <div class="section-num">Technique IV</div>
+      <div class="section-title">Utopia vs Dystopia</div>
+      <div class="section-desc">Two futures. Same tool. Different intent.</div>
+    </div>
+
+    <div class="split reveal">
+      <div class="split-utopia">
+        <div class="split-label">Utopia</div>
+        <p style="color:var(--steel);font-size:0.95rem">4000+ foundry.yaml templates. SaaS starter deploys in 22 minutes. foundry reverse for onboarding. Lock files as provenance standard. Stanford CS course uses Foundry.</p>
+      </div>
+      <div class="split-dystopia">
+        <div class="split-label">Dystopia</div>
+        <p style="color:var(--steel);font-size:0.95rem">Founder rubber-stamps 14 checkpoints in 8 minutes. JWT bug ships. Lock file becomes liability evidence not provenance. Foundry created false sense of due diligence.</p>
+      </div>
+    </div>
+
+    <div class="idea user reveal"><div class="idea-author">User</div><div class="idea-text">Anti-rubber-stamp design: minimum read time, required acknowledgment of specific decisions, explicit "approving without reading" flag in lock file, protect human from false confidence.</div></div>
+
+    <div class="insight-card reveal">
+      <div class="insight-text">The audit trail is a weapon that cuts both ways -- it proves diligence or proves negligence. Foundry must make rubber-stamping harder, not easier.</div>
+    </div>
+  </section>
+
+  <div class="forge-divider"><span>The Steel Emerges</span></div>
+
+  <!-- DESIGN PRINCIPLES -->
+  <section>
+    <div class="section-header reveal">
+      <div class="section-num">Stamped Into Metal</div>
+      <div class="section-title">Design Principles</div>
+    </div>
+
+    <div class="principles-grid">
+      <div class="stamp reveal" style="--r:-1.2"><div class="stamp-num">I</div><div class="stamp-text">Model identity is a first-class build parameter</div></div>
+      <div class="stamp reveal" style="--r:0.8"><div class="stamp-num">II</div><div class="stamp-text">External failure is the normal case, not the edge case</div></div>
+      <div class="stamp reveal" style="--r:-0.5"><div class="stamp-num">III</div><div class="stamp-text">The crown jewel is provenance and traceability, not planning</div></div>
+      <div class="stamp reveal" style="--r:1.1"><div class="stamp-num">IV</div><div class="stamp-text">Structure, incrementality, verification -- the core triad</div></div>
+      <div class="stamp reveal" style="--r:-0.9"><div class="stamp-num">V</div><div class="stamp-text">The audit trail cuts both ways -- design for honesty</div></div>
+      <div class="stamp reveal" style="--r:0.6"><div class="stamp-num">VI</div><div class="stamp-text">Make human/AI responsibility boundaries explicit</div></div>
+    </div>
+  </section>
+
+  <div class="forge-divider"><span>Final Pour</span></div>
+
+  <!-- MOSCOW -->
+  <section>
+    <div class="section-header reveal">
+      <div class="section-num">Convergence</div>
+      <div class="section-title">MoSCoW Prioritization</div>
+      <div class="section-desc">The molten ideas, cast into ranked steel.</div>
+    </div>
+
+    <div class="moscow-tier moscow-must reveal">
+      <div class="moscow-label">Must Have <div class="moscow-bar"></div></div>
+      <ul class="moscow-items">
+        <li>Foundry Pro -- full BMad pipeline orchestration</li>
+        <li>foundry.lock -- provenance, versioning, reproducibility</li>
+        <li>Git-as-forge-log -- structured commit messages as audit trail</li>
+        <li>3-category failure taxonomy -- code / infra / environment</li>
+        <li>Dockerfile output as universal deployment interface</li>
+      </ul>
+    </div>
+
+    <div class="moscow-tier moscow-should reveal">
+      <div class="moscow-label">Should Have <div class="moscow-bar"></div></div>
+      <ul class="moscow-items">
+        <li>Foundry Quick mode -- skip planning, keep guardrails</li>
+        <li>Checkpoint web UI -- rich editing in browser</li>
+        <li>Pre-flight analysis -- contradiction detection on ingest</li>
+        <li>Escalate-to-human on failure -- pause, don't loop</li>
+      </ul>
+    </div>
+
+    <div class="moscow-tier moscow-could reveal">
+      <div class="moscow-label">Could Have <div class="moscow-bar"></div></div>
+      <ul class="moscow-items">
+        <li>foundry.yaml declarative process spec</li>
+        <li>Dependency verification step</li>
+        <li>Anti-rubber-stamp checkpoint design</li>
+        <li>--from-prd human-authored spec ingest</li>
+      </ul>
+    </div>
+
+    <div class="moscow-tier moscow-wont reveal">
+      <div class="moscow-label">Won't Have (this round) <div class="moscow-bar"></div></div>
+      <ul class="moscow-items">
+        <li>foundry reverse (reverse-engineer intent from code)</li>
+        <li>DAG backtracking pipeline</li>
+        <li>Live dashboard</li>
+        <li>Template registry</li>
+        <li>Teaching / interview modes</li>
+      </ul>
+    </div>
+
+    <div class="moscow-override reveal">
+      Key override: BMad is MUST not COULD -- without it Foundry is a better shell script. The lock file needs 50+ decisions to justify itself. The planning pipeline is the product.
+    </div>
+  </section>
+
+  <!-- SYNTHESIS -->
+  <div class="synthesis">
+    <div class="section-header reveal">
+      <div class="section-num">The Alloy</div>
+      <div class="section-title">Synthesis</div>
+    </div>
+
+    <div class="through-line reveal">
+      Foundry is an observable AI process -- inspectable, replayable, auditable development. Not just a code generator.
+    </div>
+
+    <div class="connection reveal">
+      <div class="connection-icon">LINK</div>
+      <div class="connection-text"><strong>--from-prd and contradiction detector are one feature.</strong> Pre-flight analysis is the ingest layer all specs pass through -- whether AI-generated or human-authored.</div>
+    </div>
+
+    <div class="connection reveal">
+      <div class="connection-icon">LINK</div>
+      <div class="connection-text"><strong>Failure taxonomy and anti-rubber-stamp share a principle.</strong> Make human/AI responsibility boundaries explicit and honest. Never blur who decided what.</div>
+    </div>
+  </div>
+
+  <div class="footer">
+    Forged on 2026-10-28 / 22 ideas / 4 techniques / Foundry CLI Brainstorm
+  </div>
+
+</div>
+
+<script>
+// --- SPARK PARTICLES ---
+(function() {
+  const canvas = document.getElementById('sparks');
+  const ctx = canvas.getContext('2d');
+  let W, H;
+  const particles = [];
+  const MAX = 40;
+
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  function Spark() {
+    this.reset();
+  }
+  Spark.prototype.reset = function() {
+    this.x = Math.random() * W;
+    this.y = H + 10;
+    this.vx = (Math.random() - 0.5) * 0.5;
+    this.vy = -(Math.random() * 1.5 + 0.5);
+    this.life = Math.random() * 200 + 100;
+    this.age = 0;
+    this.size = Math.random() * 2 + 0.5;
+    this.hue = 25 + Math.random() * 20;
+  };
+  Spark.prototype.update = function() {
+    this.x += this.vx;
+    this.y += this.vy;
+    this.vx += (Math.random() - 0.5) * 0.05;
+    this.age++;
+    if (this.age > this.life) this.reset();
+  };
+  Spark.prototype.draw = function() {
+    const alpha = 1 - this.age / this.life;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+    ctx.fillStyle = 'hsla(' + this.hue + ',80%,60%,' + alpha + ')';
+    ctx.fill();
+  };
+
+  for (let i = 0; i < MAX; i++) {
+    const s = new Spark();
+    s.y = Math.random() * H;
+    s.age = Math.random() * s.life;
+    particles.push(s);
+  }
+
+  function loop() {
+    ctx.clearRect(0, 0, W, H);
+    particles.forEach(function(p) { p.update(); p.draw(); });
+    requestAnimationFrame(loop);
+  }
+  loop();
+})();
+
+// --- SCROLL REVEAL ---
+(function() {
+  const els = document.querySelectorAll('.reveal');
+  const obs = new IntersectionObserver(function(entries) {
+    entries.forEach(function(e) {
+      if (e.isIntersecting) {
+        e.target.classList.add('visible');
+        obs.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.15 });
+  els.forEach(function(el) { obs.observe(el); });
+})();
+</script>
+
+</body>
+</html>
