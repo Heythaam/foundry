@@ -1,0 +1,11 @@
+# Foundry runtime state (cancel sentinel, ephemeral state.db WAL, prompt files)
+.foundry/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
