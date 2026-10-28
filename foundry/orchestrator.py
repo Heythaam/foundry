@@ -19,9 +19,11 @@ from foundry.context import (
     check_model_alias,
     classify_exception,
 )
+from foundry.gitops import GitOps
 from foundry.lock import STATUS_IN_PROGRESS, LockFile
 from foundry.phases import Phase, PhaseHooks
 from foundry.provenance import ProvenanceRecorder
+from foundry.stages import CancelRequested, Stage
 
 RUN_IN_PROGRESS_MESSAGE = "Run in progress. Use `foundry resume` to continue."
 
@@ -48,16 +50,22 @@ class RunResult:
 
 class Orchestrator:
     def __init__(
-        self, phases: Sequence[Phase], checkpoint: CheckpointHandler | None = None
+        self,
+        phases: Sequence[Phase],
+        checkpoint: CheckpointHandler | None = None,
+        stages: Sequence[Stage] = (),
+        gitops: GitOps | None = None,
     ) -> None:
         self.phases = list(phases)
         self.checkpoint = checkpoint or EditorCheckpoint()
+        self.gitops = gitops
+        self.stages = list(stages)  # run after the phases: repo transition, implementation
 
     async def run(self, ctx: RunContext) -> RunResult:
         check_model_alias(ctx.model_id)
         await asyncio.to_thread(self._ensure_can_start, ctx)
         await asyncio.to_thread(clear_cancel, ctx.workspace_path)  # a sentinel from a dead run
-        recorder = ProvenanceRecorder(ctx.workspace_path)
+        recorder = ProvenanceRecorder(ctx.workspace_path, self.gitops)
         await recorder.record_run_start(ctx)
 
         artifact = Artifact(content=ctx.idea, type=ArtifactType.IDEA)
@@ -65,6 +73,14 @@ class Orchestrator:
             if is_cancel_requested(ctx.workspace_path):
                 return await self._cancel(ctx, recorder, artifact, before=f"phase {phase.name}")
             artifact = await self._execute(phase, artifact, ctx, recorder)
+
+        for stage in self.stages:
+            if is_cancel_requested(ctx.workspace_path):
+                return await self._cancel(ctx, recorder, artifact, before=f"stage {stage.name}")
+            try:
+                await self._run_stage(stage, ctx, recorder)
+            except CancelRequested as stop:
+                return await self._cancel(ctx, recorder, artifact, before=stop.before)
 
         if is_cancel_requested(ctx.workspace_path):
             return await self._cancel(ctx, recorder, artifact, before="completion")
@@ -187,6 +203,15 @@ class Orchestrator:
     @classmethod
     def _wants_revision(cls, hooks: PhaseHooks, approved: Artifact) -> bool:
         return bool(cls._hook(hooks, "requests_revision", approved))
+
+    @staticmethod
+    async def _run_stage(stage: Stage, ctx: RunContext, recorder: ProvenanceRecorder) -> None:
+        try:
+            await stage.run(ctx, recorder)
+        except CancelRequested:
+            raise
+        except Exception as exc:  # classify before propagating (AD-3)
+            raise classify_exception(exc) from exc
 
     async def _run_phase(self, phase: Phase, artifact: Artifact, ctx: RunContext) -> Artifact:
         try:

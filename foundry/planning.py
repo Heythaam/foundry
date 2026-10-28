@@ -102,12 +102,13 @@ _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 _TEST_RUNNER_INSTRUCTIONS = f"""\
 The document MUST contain a section headed exactly `## {TEST_RUNNER_SECTION}` whose body is a
 single fenced code block holding the one shell command that runs the project's entire test
-suite from the repository root and exits non-zero when any test fails. Example:
+suite from the repository root and exits non-zero when any test fails. CI runs it on a fresh
+checkout, so it must also install the project's dependencies first. Example:
 
     ## {TEST_RUNNER_SECTION}
 
     ```bash
-    pytest -q
+    pip install -e '.[dev]' && pytest -q
     ```"""
 
 

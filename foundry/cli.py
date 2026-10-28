@@ -15,7 +15,9 @@ import typer
 from foundry.context import FoundryError, RunContext
 
 if TYPE_CHECKING:
+    from foundry.gitops import GitOps
     from foundry.phases import Phase
+    from foundry.stages import Stage
 
 app = typer.Typer(
     name="foundry",
@@ -37,11 +39,25 @@ def _default_phases() -> list[Phase]:
     return build_pipeline()
 
 
+def _build_stages(workspace: Path, private: bool) -> tuple[list[Stage], GitOps | None]:
+    """The post-planning stages and the one GitOps they share. Fails before any planning work
+    is spent if GITHUB_TOKEN is missing (NFR-6)."""
+    from foundry.gitops import GitOps
+    from foundry.implementation import ImplementationStage
+    from foundry.repo import RepoStage
+
+    gitops = GitOps.from_env(workspace, require_token=True)
+    return [RepoStage(gitops, private=private), ImplementationStage(gitops)], gitops
+
+
 @app.command()
 def pro(
     idea: str = typer.Argument(..., help="The idea to take through the full pipeline."),
     review_epics: bool = typer.Option(
         False, "--review-epics", help="Pause for review before each epic starts implementation."
+    ),
+    private: bool = typer.Option(
+        False, "--private", help="Create the GitHub repository as private (default: public)."
     ),
 ) -> None:
     """Start a full planning-pipeline run with mandatory human checkpoints."""
@@ -49,7 +65,9 @@ def pro(
 
     ctx = RunContext(idea=idea, review_epics=review_epics)
     try:
-        result = asyncio.run(Orchestrator(_default_phases()).run(ctx))
+        stages, gitops = _build_stages(ctx.workspace_path, private)
+        orchestrator = Orchestrator(_default_phases(), stages=stages, gitops=gitops)
+        result = asyncio.run(orchestrator.run(ctx))
     except FoundryError as err:
         raise _fail(err.message) from err
     if result.status is RunStatus.CANCELLED:
