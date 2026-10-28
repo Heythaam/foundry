@@ -1,7 +1,0 @@
-typer>=0.15
-aiosqlite>=0.20
-tomli-w>=1.1
-
-[dev]
-pytest>=8
-pytest-asyncio>=0.24

@@ -49,3 +49,17 @@ def write_artifact(workspace: Path, phase: str, artifact: Artifact) -> Path:
             except OSError:
                 pass
     return target
+
+
+def read_artifact(workspace: Path, phase: str) -> str:
+    """Return an approved artifact's content exactly as written (UTF-8, no newline translation)."""
+    target = artifact_path(workspace, phase)
+    try:
+        return target.read_bytes().decode("utf-8")
+    except FileNotFoundError as exc:
+        raise EnvFailure(
+            f"the approved {phase} artifact is missing: expected {target}. "
+            "It is written when you approve that phase's checkpoint."
+        ) from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise EnvFailure(f"cannot read the approved {phase} artifact at {target}: {exc}") from exc
