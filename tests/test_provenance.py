@@ -15,7 +15,8 @@ from foundry.context import (
     FoundryError,
     RunContext,
 )
-from foundry.provenance import GitError, ProvenanceRecorder, commit_message, run_git
+from foundry.gitops import GitError, commit_message, run_git
+from foundry.provenance import ProvenanceRecorder
 from foundry.state import FAILED, PENDING, StateBuffer, state_db_path
 
 COMMIT_FORMAT = re.compile(r"^foundry: .+ — .+$")
@@ -144,7 +145,7 @@ class TestDualSink:
                 raise GitError("commit refused by hook")
             return await run_git(workspace, *args)
 
-        monkeypatch.setattr("foundry.provenance.run_git", broken_git)
+        monkeypatch.setattr("foundry.gitops.run_git", broken_git)
         with pytest.raises(GitError, match="commit refused"):
             await recorder.record_artifact("prd", Artifact("# PRD", ArtifactType.PRD))
 
