@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: foundry
+Version: 0.1.0
+Summary: Foundry CLI: idea to repo through a human-checkpointed planning pipeline
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: typer>=0.15
+Requires-Dist: aiosqlite>=0.20
+Requires-Dist: tomli-w>=1.1
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.24; extra == "dev"
+
+# foundry
