@@ -11,7 +11,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _hermetic_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the developer's environment out of the tests; give git an identity."""
-    for var in ("FOUNDRY_MODEL", "EDITOR", "VISUAL"):
+    for var in ("FOUNDRY_MODEL", "EDITOR", "VISUAL", "GITHUB_TOKEN", "GITHUB_API_URL"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Foundry Test")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
@@ -21,10 +21,11 @@ def _hermetic_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _stub_cli_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CLI tests run the placeholder phase; they must never launch a real agent."""
+    """CLI tests run the placeholder phase and no stages: no real agent, no GitHub."""
     from foundry.phases import StubPhase
 
     monkeypatch.setattr("foundry.cli._default_phases", lambda: [StubPhase()])
+    monkeypatch.setattr("foundry.cli._build_stages", lambda *args: ([], None))
 
 
 _FAKE_CLAUDE = r'''
@@ -32,11 +33,19 @@ import json, os, pathlib, sys, time
 
 scenario = json.loads(pathlib.Path(os.environ["FAKE_CLAUDE_SCENARIO"]).read_text(encoding="utf-8"))
 story = pathlib.Path(".foundry/current-story.md")
-pathlib.Path(scenario["record"]).write_text(json.dumps({
+invocation = {
     "argv": sys.argv[1:],
     "cwd": os.getcwd(),
+    "pid": os.getpid(),
     "prompt_file": story.read_text(encoding="utf-8") if story.exists() else None,
-}), encoding="utf-8")
+}
+pathlib.Path(scenario["record"]).write_text(json.dumps(invocation), encoding="utf-8")
+with open(scenario["record"] + ".log", "a", encoding="utf-8") as log:  # one line per session
+    log.write(json.dumps(invocation) + "\n")
+for relative, text in scenario.get("writes", {}).items():
+    target = pathlib.Path(relative)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
 
 
 def emit(obj):
@@ -107,3 +116,15 @@ def make_editor(tmp_path: Path) -> Callable[[str], list[str]]:
         return [sys.executable, str(script)]
 
     return _make
+
+
+@pytest.fixture
+def github(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A local fake GitHub (real HTTP, real bare repos) plus the env that points Foundry at it."""
+    from tests.fake_github import TOKEN, FakeGitHub
+
+    server = FakeGitHub(tmp_path / "github").start()
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    monkeypatch.setenv("GITHUB_API_URL", server.url)
+    yield server
+    server.stop()
