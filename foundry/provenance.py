@@ -24,11 +24,20 @@ from foundry.context import (
 )
 from foundry.epics import Story
 from foundry.gitops import CIResult, GitOps, PullRequestInfo, RepoInfo, commit_message
-from foundry.lock import LOCK_FILENAME, LockFile
+from foundry.lock import LOCK_FILENAME, LockFile, cancellation_count
 from foundry.state import StateBuffer, state_db_path
 
 if TYPE_CHECKING:  # failures imports stages, which imports this module
     from foundry.failures import FailureRecord, InterventionRecord
+
+
+def story_commit_message(story: Story, kind: str = "implemented") -> str:
+    """The commit subject for a story: implemented, auto-fixed (FR-21) or a human's (FR-23)."""
+    if kind == "auto-fixed":
+        return commit_message(f"story {story.id} auto-fixed", story.title)
+    if kind == "human":
+        return commit_message(f"story {story.id}", "human intervention")
+    return commit_message(f"story {story.id} implemented", story.title)
 
 
 class ProvenanceRecorder:
@@ -93,11 +102,16 @@ class ProvenanceRecorder:
         )
 
     async def record_cancelled(self, ctx: RunContext, before: str) -> None:
-        """Append [cancelled]; this ends the run without editing [run] (AD-5)."""
+        """Append [cancelled]; this ends the run without editing [run] (AD-5).
+
+        A run that was resumed and cancelled again gets `[cancelled.cancel-2]` and so on.
+        """
+        count = cancellation_count(self.lock.read())
+        section = "cancelled" if count == 0 else f"cancelled.cancel-{count + 1}"
         await self._record(
             action="cancelled",
             detail=f"before {before}",
-            section="cancelled",
+            section=section,
             fields={
                 "run_id": ctx.run_id,
                 "cancelled_at": iso_utc(utc_now()),
@@ -176,6 +190,7 @@ class ProvenanceRecorder:
         kind: str = "implemented",
         failure: FailureRecord | None = None,
         intervention: InterventionRecord | None = None,
+        recovered: bool = False,
     ) -> None:
         """Append [implementation.epic-E.story-S] and commit it with the story's changes.
 
@@ -186,18 +201,20 @@ class ProvenanceRecorder:
         `foundry: story E.S — human intervention` when the human edited the code (FR-23).
         A failure and an intervention, if any, are recorded in the same commit.
         """
-        if kind == "auto-fixed":
-            message = commit_message(f"story {story.id} auto-fixed", story.title)
-        elif kind == "human":
-            message = commit_message(f"story {story.id}", "human intervention")
-        else:
-            message = commit_message(f"story {story.id} implemented", story.title)
+        message = story_commit_message(story, kind)
         epic_story = f"epic-{story.epic}.story-{story.number}"
         sections: list[tuple[str, dict[str, Any]]] = []
         if failure is not None:
-            sections.append((f"failures.{epic_story}", self._outcome_fields(story, failure)))
+            sections.append(
+                (self.lock.next_name(f"failures.{epic_story}"), self._outcome_fields(story, failure))
+            )
         if intervention is not None:
-            sections.append((f"interventions.{epic_story}", self._outcome_fields(story, intervention)))
+            sections.append(
+                (
+                    self.lock.next_name(f"interventions.{epic_story}"),
+                    self._outcome_fields(story, intervention),
+                )
+            )
         sections.append(
             (
                 f"implementation.{epic_story}",
@@ -209,6 +226,7 @@ class ProvenanceRecorder:
                     "tests_counted": tests_passed is not None,
                     "duration_seconds": round(duration_seconds, 3),
                     "retries": retries,
+                    **({"recovered_on_resume": True} if recovered else {}),
                     "completed_at": iso_utc(utc_now()),
                 },
             )
@@ -242,9 +260,16 @@ class ProvenanceRecorder:
         epic_story = f"epic-{story.epic}.story-{story.number}"
         sections: list[tuple[str, dict[str, Any]]] = []
         if failure is not None:
-            sections.append((f"failures.{epic_story}", self._outcome_fields(story, failure)))
+            sections.append(
+                (self.lock.next_name(f"failures.{epic_story}"), self._outcome_fields(story, failure))
+            )
         if intervention is not None:
-            sections.append((f"interventions.{epic_story}", self._outcome_fields(story, intervention)))
+            sections.append(
+                (
+                    self.lock.next_name(f"interventions.{epic_story}"),
+                    self._outcome_fields(story, intervention),
+                )
+            )
         if outcome == "deferred":
             sections.append(
                 (
@@ -265,6 +290,94 @@ class ProvenanceRecorder:
             section=sections[-1][0],
             write=write,
         )
+
+    async def record_resumed(self, fields: dict[str, Any]) -> str:
+        """Append [resumes.resume-N] and commit `foundry: resumed` (FR-3, NFR-4).
+
+        `fields` describes where the run resumed; this adds the cancellations it acknowledges,
+        which is what makes a cancelled run in progress again. Returns the section name.
+        """
+        data = self.lock.read()
+        existing = data.get("resumes", {})
+        number = (len(existing) if isinstance(existing, dict) else 0) + 1
+        section = f"resumes.resume-{number}"
+        point = fields.get("resume_point")
+        await self._record(
+            action="resumed",
+            detail=str(point or ""),
+            section=section,
+            fields={
+                **fields,
+                "cancellations_seen": cancellation_count(data),
+                "resumed_at": iso_utc(utc_now()),
+            },
+            message="foundry: resumed" + (f" — {point}" if point else ""),
+        )
+        return section
+
+    async def record_model_change(
+        self, original: str, new: str, boundary_story: str, completed: int, total: int
+    ) -> str:
+        """Append [model_changes.change-N]: the model the run continues on (FR-33).
+
+        `[run].model` is never edited; the latest change is the model in force. The change is
+        also the flag that a consistency pass is due once the current epic completes.
+        """
+        existing = self.lock.read().get("model_changes", {})
+        number = (len(existing) if isinstance(existing, dict) else 0) + 1
+        section = f"model_changes.change-{number}"
+        await self._record(
+            action="model changed",
+            detail=f"{original} -> {new}",
+            section=section,
+            fields={
+                "from": original,
+                "to": new,
+                "boundary_story": boundary_story,
+                "stories_completed": completed,
+                "stories_total": total,
+                "changed_at": iso_utc(utc_now()),
+            },
+        )
+        return section
+
+    async def record_consistency_pass(
+        self,
+        *,
+        through_change: int,
+        original_model: str,
+        new_model: str,
+        boundary_story: str,
+        completed: int,
+        total: int,
+        outcome: str,
+        files_changed: int,
+        paths: Sequence[str] | None = (LOCK_FILENAME,),
+    ) -> str:
+        """Append [consistency.pass-N] (FR-34) and commit it.
+
+        With `paths=None` the commit also takes the pass's own changes, so the style changes and
+        the entry that describes them land together as `foundry: consistency pass — ...`.
+        """
+        existing = self.lock.read().get("consistency", {})
+        number = (len(existing) if isinstance(existing, dict) else 0) + 1
+        section = f"consistency.pass-{number}"
+        await self._record(
+            action="consistency pass",
+            detail=f"model boundary at story {completed}/{total}",
+            section=section,
+            fields={
+                "through_change": through_change,
+                "original_model": original_model,
+                "new_model": new_model,
+                "boundary_story": boundary_story,
+                "outcome": outcome,
+                "files_changed": files_changed,
+                "completed_at": iso_utc(utc_now()),
+            },
+            paths=paths,
+        )
+        return section
 
     async def record_halt(
         self,

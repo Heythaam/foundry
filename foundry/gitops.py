@@ -70,6 +70,8 @@ class PullRequestInfo:
     url: str
     head_branch: str
     head_sha: str
+    merged: bool = False  # already merged (found again after a crash)
+    merge_sha: str = ""
 
 
 @dataclass(frozen=True)
@@ -217,6 +219,10 @@ class GitOps:
         diff = await _run_git_raw(self.workspace, "diff", "--cached", "--binary")
         return sha256_of(diff) if diff else None
 
+    async def staged_files(self) -> list[str]:
+        out = await run_git(self.workspace, "diff", "--cached", "--name-only")
+        return [line for line in out.splitlines() if line.strip()]
+
     async def discard_staged(self) -> None:
         await run_git(self.workspace, "reset", "--quiet")
 
@@ -224,6 +230,33 @@ class GitOps:
         """Every change in the working tree since the last commit, new files included."""
         await self.stage_all()
         return await run_git(self.workspace, "diff", "--cached", "--no-color")
+
+    async def committed_file(self, path: str) -> str:
+        """`path` as of HEAD, or "" if HEAD has no such file (or there is no HEAD yet)."""
+        try:
+            return await run_git(self.workspace, "show", f"HEAD:{path}")
+        except GitError:
+            return ""
+
+    async def branch_exists(self, name: str) -> bool:
+        try:
+            await run_git(self.workspace, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}")
+        except GitError:
+            return False
+        return True
+
+    async def subjects_ahead(self, branch: str, base: str = MAIN_BRANCH) -> list[str]:
+        """The subjects of the commits `branch` has that `base` does not, oldest first."""
+        out = await run_git(self.workspace, "log", "--reverse", "--format=%s", f"{base}..{branch}")
+        return [line for line in out.splitlines() if line.strip()]
+
+    async def switch_to_branch(self, name: str) -> None:
+        """Check out `name`, creating it from the remote branch if only the remote has it."""
+        if await self.branch_exists(name):
+            await self.checkout(name)
+            return
+        await self._remote_git("fetch", "--quiet", REMOTE, name)
+        await run_git(self.workspace, "checkout", "--quiet", "-b", name, f"{REMOTE}/{name}")
 
     async def stash(self, message: str) -> None:
         """Set the working-tree changes (untracked files too) aside without losing them."""
@@ -364,12 +397,12 @@ class GitOps:
 
         def call(gh: Any) -> PullRequestInfo:
             repo = gh.get_repo(full_name)
-            # A retry after a timeout must not open a second PR if the first one got through.
-            for existing in repo.get_pulls(state="open", base=base):
-                if existing.head.ref == head:
-                    return PullRequestInfo(existing.number, existing.html_url, head, existing.head.sha)
-            pr = repo.create_pull(title=title, body=body, head=head, base=base)
-            return PullRequestInfo(pr.number, pr.html_url, head, pr.head.sha)
+            # A retry after a timeout, or a resume after a crash, must not open a second PR if
+            # the first one got through: an open one is reused, and so is a merged one.
+            for existing in repo.get_pulls(state="all", base=base):
+                if existing.head.ref == head and (existing.state == "open" or existing.merged):
+                    return _pull_info(existing)
+            return _pull_info(repo.create_pull(title=title, body=body, head=head, base=base))
 
         return await self._github(call, f"open a pull request from {head!r}")
 
@@ -378,8 +411,7 @@ class GitOps:
         full_name = self._require_repo()
 
         def call(gh: Any) -> PullRequestInfo:
-            pr = gh.get_repo(full_name).get_pull(number)
-            return PullRequestInfo(pr.number, pr.html_url, pr.head.ref, pr.head.sha)
+            return _pull_info(gh.get_repo(full_name).get_pull(number))
 
         return await self._github(call, f"read pull request #{number}")
 
@@ -438,6 +470,18 @@ class GitOps:
         if not self.repo_full_name:
             raise EnvFailure("no GitHub repository is attached to this run yet")
         return self.repo_full_name
+
+
+def _pull_info(pr: Any) -> PullRequestInfo:
+    merged = bool(pr.merged)
+    return PullRequestInfo(
+        pr.number,
+        pr.html_url,
+        pr.head.ref,
+        pr.head.sha,
+        merged=merged,
+        merge_sha=(pr.merge_commit_sha or "") if merged else "",
+    )
 
 
 def _summarise_checks(checks: list[tuple[str, str | None, str, str]]) -> CIResult:

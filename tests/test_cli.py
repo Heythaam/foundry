@@ -51,9 +51,8 @@ class TestStartup:
 
 
 class TestStubs:
-    @pytest.mark.parametrize("args", [["quick", "an idea"], ["resume"], ["status"]])
-    def test_non_pro_commands_are_stubs(self, args: list[str]) -> None:
-        result = runner.invoke(app, args)
+    def test_quick_is_still_a_stub(self) -> None:
+        result = runner.invoke(app, ["quick", "an idea"])
         assert result.exit_code == 1
         assert "not implemented" in result.output
 

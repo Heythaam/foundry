@@ -104,15 +104,44 @@ def quick(idea: str = typer.Argument(..., help="The idea to build in Quick mode.
 
 
 @app.command()
-def resume() -> None:
-    """Continue a previously interrupted run (not implemented yet)."""
-    raise _fail("`foundry resume` is not implemented yet.")
+def resume(
+    private: bool = typer.Option(
+        False, "--private", help="If the repository still has to be created, make it private."
+    ),
+) -> None:
+    """Continue an interrupted run from its last completed story."""
+    from foundry.gitops import GitOps
+    from foundry.orchestrator import Orchestrator, RunStatus
+    from foundry.resume import ResumeCoordinator, context_from_lock
+
+    workspace = Path.cwd()
+    try:
+        ctx = context_from_lock(workspace)
+        stages, gitops = _build_stages(workspace, private)
+        coordinator = ResumeCoordinator(ctx, gitops or GitOps.from_env(workspace))
+        orchestrator = Orchestrator([], stages=stages, gitops=gitops)
+        result = asyncio.run(orchestrator.resume(ctx, coordinator.prepare))
+    except FoundryError as err:
+        raise _fail_with(err) from err
+    if result.status is RunStatus.CANCELLED:
+        raise _fail(f"Run {ctx.run_id} cancelled. `foundry resume` continues it.")
+    typer.echo(f"Run {ctx.run_id} finished.")
 
 
 @app.command()
 def status() -> None:
-    """Show the state of the current run (not implemented yet)."""
-    raise _fail("`foundry status` is not implemented yet.")
+    """Show where the current run stands."""
+    from foundry.lock import LockFile
+    from foundry.progress import progress_from_lock
+    from foundry.status import NO_RUN_MESSAGE, render_status
+
+    try:
+        progress = progress_from_lock(LockFile.for_workspace(Path.cwd()).read())
+    except FoundryError as err:
+        raise _fail(err.message) from err
+    if progress is None:
+        raise _fail(NO_RUN_MESSAGE)
+    typer.echo(render_status(progress))
 
 
 @app.command()

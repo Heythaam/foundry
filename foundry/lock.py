@@ -23,13 +23,59 @@ STATUS_IN_PROGRESS = "in_progress"
 STATUS_CANCELLED = "cancelled"
 STATUS_COMPLETED = "completed"
 
-# [run].status is written once, as "in_progress", and never edited. A run ends by
-# appending one of these terminal sections instead.
-_TERMINAL_SECTIONS = {"cancelled": STATUS_CANCELLED, "completed": STATUS_COMPLETED}
+# [run].status is written once, as "in_progress", and never edited. A run ends by appending a
+# terminal section instead. `[completed]` is final. `[cancelled]` is not: `foundry resume`
+# appends `[resumes.resume-N]`, which records how many cancellations it had seen, so a run is
+# cancelled exactly when it has more cancellations than any resume has acknowledged. A second
+# cancellation is `[cancelled.cancel-2]`, and so on: section names are never reused.
 
 
 class LockError(EnvFailure):
     """The lock file could not be read, validated, or written."""
+
+
+def _numbered(node: Any, prefix: str) -> list[tuple[int, dict[str, Any]]]:
+    """The `prefix<N>` sub-tables of `node`, ordered by N."""
+    found: list[tuple[int, dict[str, Any]]] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key.startswith(prefix) and key[len(prefix) :].isdigit() and isinstance(value, dict):
+                found.append((int(key[len(prefix) :]), value))
+    return sorted(found, key=lambda item: item[0])
+
+
+def cancellation_count(data: dict[str, Any]) -> int:
+    cancelled = data.get("cancelled")
+    if not isinstance(cancelled, dict):
+        return 0
+    return 1 + len(_numbered(cancelled, "cancel-"))
+
+
+def status_of(data: dict[str, Any]) -> str | None:
+    if "run" not in data:
+        return None
+    if "completed" in data:
+        return STATUS_COMPLETED
+    acknowledged = max(
+        (int(r.get("cancellations_seen", 0)) for _, r in _numbered(data.get("resumes"), "resume-")),
+        default=0,
+    )
+    return STATUS_CANCELLED if cancellation_count(data) > acknowledged else STATUS_IN_PROGRESS
+
+
+def names_of(data: dict[str, Any]) -> list[str]:
+    """Dotted names of every table in `data` that holds values of its own, in order."""
+    names: list[str] = []
+
+    def walk(prefix: str, node: dict[str, Any]) -> None:
+        if prefix and any(not isinstance(value, dict) for value in node.values()):
+            names.append(prefix)
+        for key, value in node.items():
+            if isinstance(value, dict):
+                walk(f"{prefix}.{key}" if prefix else key, value)
+
+    walk("", data)
+    return names
 
 
 def _nest(dotted_name: str, fields: dict[str, Any]) -> dict[str, Any]:
@@ -75,19 +121,36 @@ class LockFile:
 
     def status(self) -> str | None:
         """None if there is no run; otherwise in_progress, cancelled or completed."""
-        data = self.read()
-        if "run" not in data:
-            return None
-        for section, status in _TERMINAL_SECTIONS.items():
-            if section in data:
-                return status
-        return STATUS_IN_PROGRESS
+        return status_of(self.read())
 
     def test_runner(self) -> str | None:
         """The test command extracted from the approved architecture, if recorded."""
         runner = self.read().get("run", {}).get("test_runner")
         command = runner.get("command") if isinstance(runner, dict) else None
         return command if isinstance(command, str) else None
+
+    def current_model(self) -> str | None:
+        """The model the run is on now: the latest `[model_changes.change-N].to`, else `[run].model`."""
+        data = self.read()
+        changes = _numbered(data.get("model_changes"), "change-")
+        if changes:
+            return str(changes[-1][1].get("to") or "") or None
+        model = data.get("run", {}).get("model")
+        return model if isinstance(model, str) else None
+
+    def next_name(self, base: str) -> str:
+        """`base` if unused, else `base.run-2`, `base.run-3`...: the lock never reuses a section."""
+        data = self.read()
+        if not isinstance(_lookup(data, base), dict):
+            return base
+        number = 2
+        while isinstance(_lookup(data, f"{base}.run-{number}"), dict):
+            number += 1
+        return f"{base}.run-{number}"
+
+    def section_names(self) -> list[str]:
+        """Dotted names of every section that holds values, in file order."""
+        return names_of(self.read())
 
     def is_in_progress(self) -> bool:
         return self.status() == STATUS_IN_PROGRESS
