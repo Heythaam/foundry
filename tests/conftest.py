@@ -11,7 +11,16 @@ import pytest
 @pytest.fixture(autouse=True)
 def _hermetic_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the developer's environment out of the tests; give git an identity."""
-    for var in ("FOUNDRY_MODEL", "EDITOR", "VISUAL", "GITHUB_TOKEN", "GITHUB_API_URL"):
+    for var in (
+        "FOUNDRY_MODEL",
+        "FOUNDRY_MAX_RETRIES",
+        "EDITOR",
+        "VISUAL",
+        "GITHUB_TOKEN",
+        "GITHUB_API_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Foundry Test")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")

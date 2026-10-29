@@ -64,13 +64,12 @@ class RepoStage:
 
     async def run(self, ctx: RunContext, recorder: ProvenanceRecorder) -> None:
         lock = recorder.lock
+        existing = lock.read().get("repo")
+        if isinstance(existing, dict):
+            self.git.repo_full_name = str(existing.get("full_name") or "") or None
         if lock.has_section("scaffold"):
-            return  # already transitioned; nothing to redo
-        if lock.has_section("repo"):
-            raise EnvFailure(
-                "a repository was created for this run but its scaffold was not committed; "
-                "finishing that is the job of `foundry resume`."
-            )
+            await self._ensure_published(existing)  # a crash may have come before the push
+            return
         command = lock.test_runner()
         if command is None:
             raise EnvFailure(
@@ -92,17 +91,30 @@ class RepoStage:
             license_holder=holder,
             year=ctx.start_time.year,
         )
-        self._refuse_to_overwrite(ctx.workspace_path, files)
-
-        await self.git.prepare_for_scaffold()
-        info = await self._create_repo(slugify(title), ctx.idea)
-        await recorder.record_repo(info)
+        if isinstance(existing, dict):
+            # The repository was created and recorded, then the run stopped before the scaffold
+            # was committed (`foundry resume`). The files are ours: write them again.
+            clone_url = str(existing.get("clone_url", ""))
+        else:
+            self._refuse_to_overwrite(ctx.workspace_path, files)
+            await self.git.prepare_for_scaffold()
+            info = await self._create_repo(slugify(title), ctx.idea)
+            await recorder.record_repo(info)
+            clone_url = info.clone_url
 
         written = self.git.write_files(files)
         hashes = {path: sha256_of(files[path]) for path in written}
         await recorder.record_scaffold(MAIN_BRANCH, hashes, written)
 
-        await self.git.add_remote(info.clone_url)
+        await self._ensure_published({"clone_url": clone_url})
+
+    async def _ensure_published(self, repo: dict | None) -> None:
+        """The scaffold commit is on the remote's `main`, whatever happened before."""
+        if not await self.git.has_remote():
+            clone_url = str((repo or {}).get("clone_url", ""))
+            if not clone_url:
+                raise EnvFailure("foundry.lock has no [repo].clone_url to attach as the remote.")
+            await self.git.add_remote(clone_url)
         await self.git.push(MAIN_BRANCH)
 
     async def _create_repo(self, suggested: str, idea: str) -> RepoInfo:
