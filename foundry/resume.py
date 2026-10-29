@@ -30,6 +30,7 @@ from foundry.lock import LOCK_FILENAME, LockFile, names_of
 from foundry.models import AnthropicModelChecker, ModelChecker, ModelPrompt, TerminalModelPrompt
 from foundry.progress import (
     PHASE_DONE,
+    PHASE_FINALIZATION,
     PHASE_PLANNING,
     RunProgress,
     progress_from_lock,
@@ -93,6 +94,8 @@ def resume_point(progress: RunProgress) -> str:
     """Where the run picks up, in words: `story 1.2 (1 of 3 done)`."""
     if progress.next_story:
         return f"story {progress.next_story} ({progress.completed_count} of {progress.stories_total} done)"
+    if progress.phase == PHASE_FINALIZATION and not progress.dockerfile:
+        return "finalization (the Dockerfile)"
     open_epics = [e for e in progress.started_epics if e not in progress.merged_epics]
     if open_epics:
         return f"finishing epic {open_epics[0]} (all {progress.stories_total} stories done)"
@@ -203,12 +206,20 @@ class ResumeCoordinator:
             return []
 
         story_entries = [name for name in pending if name.startswith("implementation.")]
-        if story_entries:
+        if "dockerfile" in pending:
+            # The Dockerfile (and anything the session changed for it) goes in with its entry.
+            await self.git.commit(self._dockerfile_message(data), None)
+        elif story_entries:
             message = self._story_message(data, story_entries[-1], pending)
             await self.git.commit(message, None)  # the story's changes and its lock entries together
         else:
             await self.git.commit(await self._lock_message(pending), [LOCK_FILENAME])
         return pending
+
+    @staticmethod
+    def _dockerfile_message(data: dict) -> str:
+        entry = _section(data, "dockerfile")
+        return commit_message("dockerfile generated", f"{entry.get('base_image', '?')}, {entry.get('port', '?')}")
 
     @staticmethod
     def _story_message(data: dict, section: str, pending: list[str]) -> str:

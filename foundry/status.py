@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from foundry.progress import (
     PHASE_DONE,
+    PHASE_FINALIZATION,
     PHASE_IMPLEMENTATION,
     PHASE_PLANNING,
     PHASE_REPO,
@@ -52,6 +53,10 @@ def _phase_line(progress: RunProgress) -> str:
         return f"planning{after}"
     if progress.phase == PHASE_REPO:
         return "creating the repository"
+    if progress.phase == PHASE_FINALIZATION:
+        if progress.dockerfile:
+            return "finalization: recording completion"
+        return "finalization: generating the Dockerfile"
     assert progress.phase == PHASE_IMPLEMENTATION
     if progress.next_story:
         return f"implementation, epic {progress.next_epic}, next story {progress.next_story}"
@@ -80,6 +85,9 @@ def render_status(progress: RunProgress, now: datetime | None = None) -> str:
             f"  Stories:     {progress.completed_count} of {progress.stories_total} completed{suffix}"
         )
         lines.append(f"  Epics:       {len(progress.merged_epics)} of {progress.epics_total} merged")
+    if progress.dockerfile:
+        image, port = progress.dockerfile.get("base_image"), progress.dockerfile.get("port")
+        lines.append(f"  Dockerfile:  generated ({image}, port {port})")
     model = f"  Model:       {progress.model}"
     if progress.pending_model_change:
         change = progress.pending_model_change
