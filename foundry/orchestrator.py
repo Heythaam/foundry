@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from foundry.artifacts import PERSISTED_PHASES, write_artifact
+from foundry.artifacts import PERSISTED_PHASES, read_artifact, write_artifact
 from foundry.cancel import clear_cancel, is_cancel_requested
 from foundry.checkpoint import CheckpointHandler, EditorCheckpoint
 from foundry.context import (
@@ -77,6 +77,38 @@ class Orchestrator:
                 return await self._cancel(ctx, recorder, artifact, before=f"phase {phase.name}")
             artifact = await self._execute(phase, artifact, ctx, recorder)
 
+        return await self._finish(ctx, recorder, artifact)
+
+    async def resume(
+        self,
+        ctx: RunContext,
+        prepare: Callable[[ProvenanceRecorder], Awaitable[None]] | None = None,
+    ) -> RunResult:
+        """Continue a run whose planning is approved (FR-3): the stages again, from the lock.
+
+        `prepare` runs first, with the recorder: the resume module reconciles what the crash left
+        behind, checks the model and records `foundry: resumed`. Planning phases are not re-run.
+        """
+        check_model_alias(ctx.model_id)
+        await asyncio.to_thread(clear_cancel, ctx.workspace_path)  # a sentinel from the dead run
+        recorder = ProvenanceRecorder(ctx.workspace_path, self.gitops)
+        try:
+            if prepare is not None:
+                await prepare(recorder)
+            epics = await asyncio.to_thread(read_artifact, ctx.workspace_path, "epics")
+        except Exception as exc:  # classify before propagating (AD-3)
+            error = classify_exception(exc, "resume")
+            if error is exc:
+                raise
+            raise error from exc
+        artifact = Artifact(content=epics, type=ArtifactType.EPICS)
+        ctx.upstream["epics"] = artifact
+        return await self._finish(ctx, recorder, artifact)
+
+    async def _finish(
+        self, ctx: RunContext, recorder: ProvenanceRecorder, artifact: Artifact
+    ) -> RunResult:
+        """The stages after planning, then the completion record."""
         for stage in self.stages:
             if is_cancel_requested(ctx.workspace_path):
                 return await self._cancel(ctx, recorder, artifact, before=f"stage {stage.name}")

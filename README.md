@@ -3,11 +3,11 @@
 Foundry takes an idea through a human-checkpointed pipeline and records every step as
 tamper-evident provenance in two places at once: `foundry.lock` and git history.
 
-> **Status:** Epics 1-4 (core infrastructure, the planning pipeline, repo creation and the
-> implementation loop, failure handling). `foundry pro` plans (brainstorm -> PRD -> pre-flight -> architecture ->
+> **Status:** Epics 1-5 (core infrastructure, the planning pipeline, repo creation and the
+> implementation loop, failure handling, resume and recovery). `foundry pro` plans (brainstorm -> PRD -> pre-flight -> architecture ->
 > epics/stories, each with a human checkpoint), creates a GitHub repo, then builds every story in
 > its own Claude Code session and merges one PR per epic. `foundry cancel` works; `quick`,
-> `resume` and `status` are stubs. Failed stories are retried once, flaky API calls are backed
+> `resume` and `status` work; `quick` is a stub. Failed stories are retried once, flaky API calls are backed
 > off, persistent failures are escalated to you in `$EDITOR`, and environment failures stop the
 > run with what to fix.
 
@@ -109,6 +109,39 @@ Failures and your choices are recorded as `[failures.epic-E.story-S]` (category,
 a hash of the output) and `[interventions.epic-E.story-S]` (actions, whether you edited the story
 or code); skipped stories get `[deferred.epic-E.story-S]`.
 
+### Resume, status and model changes (Epic 5)
+
+`foundry resume` continues an interrupted run (crash, `foundry cancel`, or an environment failure)
+from the last completed story. It works from what is recorded, never from memory:
+
+1. It reads `foundry.lock` and git, and prints the resume point (`story 1.2 (1 of 3 done)`) and
+   the pinned model. Planning cannot be resumed: a run that stopped before the epics were approved
+   has to be started again.
+2. A lock entry that was written but whose commit was lost to a crash is committed, once, with
+   the message the lost commit would have had. Missing planning documents in `.foundry/artifacts`
+   are restored from `docs/planning/` in git, and `.foundry/state.db` is rebuilt from the lock.
+3. A story that was in flight is settled by its working tree. Clean: it starts again. Changes that
+   pass the tests: committed as that story (`recovered_on_resume = true`) and the loop moves on.
+   Changes that fail: set aside in `git stash` and the story runs again. At worst one story is
+   re-run, and no story is committed twice. A merged pull request, a branch or a repository that
+   was created but never recorded are found again rather than created a second time.
+4. It records `[resumes.resume-N]` and commits `foundry: resumed — <resume point>`.
+
+`foundry status` prints the phase, the epic and story that are next, completed / total stories,
+merged epics, the model, elapsed time and the time of the last recorded action. It reads only the
+recorded state, so it is accurate to within the one story in flight and safe to run while another
+terminal is working on the run.
+
+If `ANTHROPIC_API_KEY` is set, resume asks the Models API whether the pinned model still exists.
+If it does not, you pick a replacement from the list (or type an ID); it is recorded as
+`[model_changes.change-N]` (`[run].model` is never edited) and the rest of the run uses it. The
+change schedules a **consistency pass**: when the current epic has merged and before the next one
+starts, one dedicated Claude Code session normalises naming, formatting and comment style (no
+logic changes). It is committed on `main` as `foundry: consistency pass — model boundary at story
+N/M` with a `[consistency.pass-N]` entry. If the tests fail afterwards, its changes are stashed and
+the pass is recorded as reverted. Without an API key (or if the API cannot be reached) the check
+is skipped with a notice and the run continues on the pinned model.
+
 ### Pre-flight
 
 After the PRD, pre-flight reports contradictions, missing topics (authentication, error
@@ -125,6 +158,7 @@ recorded in the lock as `[run.test_runner]`.
 | --- | --- |
 | `GITHUB_TOKEN` | Required for `foundry pro`. The only source of GitHub credentials. |
 | `GITHUB_API_URL` | Optional API base URL. Default `https://api.github.com`. |
+| `ANTHROPIC_API_KEY` | Optional. Lets `foundry resume` check that the pinned model is still available. `ANTHROPIC_BASE_URL` overrides the API endpoint. |
 | `FOUNDRY_MAX_RETRIES` | Optional. How many times an infrastructure failure is retried before you are asked. Default `5`; `0` turns backoff off. |
 | `FOUNDRY_MODEL` | Pinned model ID recorded in `[run].model`. Default `claude-sonnet-4-5`. An ID whose last `-` segment has no digit (e.g. `claude-sonnet`) is rejected as an alias. |
 | `EDITOR` | Command used for checkpoints. Falls back to `vi` (Unix) or `notepad` (Windows). It must block until the file is closed (`code --wait`, not `code`). |
@@ -148,6 +182,10 @@ recorded in the lock as `[run.test_runner]`.
 | `repo.py` | `RepoStage`: confirm name, create repo, scaffold commit, push |
 | `implementation.py` | `ImplementationStage`: epic branches, story sessions, test gate, commits, PRs, merge |
 | `testgate.py` | Runs the recorded test command, captures its output |
+| `progress.py` | Where a run stands, computed from the lock alone (shared by resume and status) |
+| `resume.py` | `ResumeCoordinator`: validates, repairs crash leftovers, rebuilds the state buffer, checks the model, records `foundry: resumed` |
+| `status.py` | `foundry status` output |
+| `models.py` | Model availability check (Models API) and the replacement-model prompt |
 | `failures.py` | Failure policy: classifier, backoff, one-shot code retry, `$EDITOR` escalation, fix hints |
 | `stages.py` | `Stage` protocol for the steps after planning |
 | `lock.py` | `foundry.lock`: append-only TOML, atomic temp-file + rename writes |
@@ -163,7 +201,8 @@ recorded in the lock as `[run.test_runner]`.
 named sections (`[artifacts.prd]`, `[checkpoints.prd]`, `[checkpoints.prd.revision-1]`,
 `[run.test_runner]`, `[plan]`, `[repo]`, `[scaffold]`, `[epics.epic-1]`, `[epics.epic-1.merged]`,
 `[implementation.epic-1.story-1]`, `[failures.epic-1.story-1]`, `[interventions.epic-1.story-1]`,
-`[deferred.epic-1.story-1]`, `[halts.halt-1]`, `[cancelled]`, `[completed]`), so a run's
+`[deferred.epic-1.story-1]`, `[halts.halt-1]`, `[resumes.resume-1]`, `[model_changes.change-1]`,
+`[consistency.pass-1]`, `[cancelled]`, `[cancelled.cancel-2]`, `[completed]`), so a run's
 end is recorded by appending a section rather than by changing `[run].status`. A run is
 "in progress" while `[run]` exists and neither `[cancelled]` nor `[completed]` does.
 

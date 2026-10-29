@@ -20,11 +20,18 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from foundry.agent import AgentRequest, AgentResult, AgentRunner, ClaudeCodeRunner, print_to_terminal
-from foundry.artifacts import read_artifact
+from foundry.artifacts import read_artifact, write_artifact
 from foundry.cancel import is_cancel_requested
 from foundry.checkpoint import CheckpointHandler, EditorCheckpoint
-from foundry.context import CodeFailure, EnvFailure, FoundryError, RunContext
-from foundry.epics import Epic, Story, validate_plan
+from foundry.context import (
+    Artifact,
+    ArtifactType,
+    CodeFailure,
+    EnvFailure,
+    FoundryError,
+    RunContext,
+)
+from foundry.epics import Epic, Story, parse_stories, validate_plan
 from foundry.failures import (
     BackoffPolicy,
     EscalationCancelled,
@@ -35,6 +42,7 @@ from foundry.failures import (
     with_backoff,
 )
 from foundry.gitops import MAIN_BRANCH, CIResult, GitOps, PullRequestInfo
+from foundry.progress import RunProgress, progress_from_lock
 from foundry.provenance import ProvenanceRecorder
 from foundry.review import EpicReviewer, ProjectState
 from foundry.scaffold import slugify
@@ -196,6 +204,9 @@ class ImplementationStage:
     # ------------------------------------------------------------------- the loop
 
     async def run(self, ctx: RunContext, recorder: ProvenanceRecorder) -> None:
+        """Every epic in order. The lock says what is already done, so the same loop starts a run
+        and finishes one that `foundry resume` picked up: merged epics are skipped, a started epic
+        is rejoined on its branch, and only stories with no record are implemented (NFR-4)."""
         command = recorder.lock.test_runner()
         if command is None:
             raise EnvFailure("foundry.lock has no [run.test_runner]; there is nothing to gate on.")
@@ -204,40 +215,115 @@ class ImplementationStage:
         epics = validate_plan(await asyncio.to_thread(read_artifact, workspace, "epics"))
         reviewer = EpicReviewer.for_run(ctx, self.checkpoint or EditorCheckpoint(), recorder)
 
-        completed: list[str] = []
-        merged: list[int] = []
+        progress = self._progress(recorder)
+        if progress.merged_epics:
+            # A crash after the merge record but before the push leaves main ahead of the remote.
+            await self._guard(
+                "the run", "push main", lambda: self.git.push(MAIN_BRANCH, set_upstream=False), ctx
+            )
+
         for index, epic in enumerate(epics):
             self._check_cancel(ctx, f"epic {epic.number}")
-            state = ProjectState(
-                tuple(completed), tuple(merged), tuple(e.number for e in epics[index + 1 :])
-            )
-            review = await reviewer.before_epic(epic, state)
-            if review.reviewed:
-                # The review's checkpoint commit is on main; publish it so main stays in step
-                # with the remote and the post-merge fast-forward stays a fast-forward.
-                await self._guard(
-                    f"epic {epic.number}", "push main", lambda: self.git.push(MAIN_BRANCH, set_upstream=False), ctx
-                )
-            epic = review.epic
-            if not epic.stories:
-                self.say(f"Epic {epic.number}: every story was skipped in review; nothing to do.")
+            progress = self._progress(recorder)
+            if epic.number in progress.merged_epics:
                 continue
+            resuming = epic.number in progress.started_epics
+            if not resuming:
+                await self.consistency_pass(ctx, recorder, command, architecture)
+
+            if resuming:
+                epic = self._recorded_epic(epic, recorder, workspace)
+            else:
+                epic = await self._review(epic, epics[index + 1 :], progress, ctx, recorder, reviewer)
+                if not epic.stories:
+                    self.say(f"Epic {epic.number}: every story was skipped in review; nothing to do.")
+                    continue
 
             self.say(f"Epic {epic.number}: {epic.title}")
             with self._located(epic=epic.number):
-                branch = await self.start_epic(epic, ctx, recorder)
-                deferred: list[Story] = []
+                if resuming:
+                    branch = await self.rejoin_epic(epic, command, ctx, recorder)
+                else:
+                    branch = await self.start_epic(epic, ctx, recorder)
                 for story in epic.stories:
+                    if story.id in self._settled(recorder):
+                        continue
                     self._check_cancel(ctx, f"story {story.id}")
                     with self._located(story=story.id):
-                        if await self.implement_story(story, architecture, command, ctx, recorder):
-                            completed.append(story.id)
-                        else:
-                            deferred.append(story)
+                        await self.implement_story(story, architecture, command, ctx, recorder)
+                deferred = [s for s in epic.stories if s.id in self._progress(recorder).deferred]
                 # Even if every story was deferred the branch carries the epic's lock entries,
                 # so it still goes through a pull request and lands on main.
                 await self.finish_epic(epic, branch, ctx, recorder, deferred=deferred)
-            merged.append(epic.number)
+
+        await self.consistency_pass(ctx, recorder, command, architecture)
+
+    @staticmethod
+    def _progress(recorder: ProvenanceRecorder) -> RunProgress:
+        progress = progress_from_lock(recorder.lock.read())
+        if progress is None:
+            raise EnvFailure("foundry.lock records no run.")
+        return progress
+
+    def _settled(self, recorder: ProvenanceRecorder) -> set[str]:
+        progress = self._progress(recorder)
+        return set(progress.implemented) | set(progress.deferred) | set(progress.skipped_in_review)
+
+    async def _review(
+        self,
+        epic: Epic,
+        later: Sequence[Epic],
+        progress: RunProgress,
+        ctx: RunContext,
+        recorder: ProvenanceRecorder,
+        reviewer: EpicReviewer,
+    ) -> Epic:
+        """The epic as it will be built: reviewed if `--review-epics`, and only reviewed once."""
+        data = recorder.lock.read()
+        review_key = f"epic-{epic.number}-review"
+        if review_key in (data.get("checkpoints") or {}):
+            # Reviewed before a crash and not started: do not ask again (the record is append-only).
+            return self._reviewed_epic(epic, data["checkpoints"][review_key], ctx.workspace_path)
+        state = ProjectState(
+            progress.implemented, progress.merged_epics, tuple(e.number for e in later)
+        )
+        review = await reviewer.before_epic(epic, state)
+        if review.reviewed:
+            text = "\n\n".join(story.raw for story in review.epic.stories)
+            await asyncio.to_thread(
+                write_artifact,
+                ctx.workspace_path,
+                f"epic-{epic.number}-reviewed",
+                Artifact(text + "\n", ArtifactType.EPIC_REVIEW),
+            )
+            # The review's checkpoint commit is on main; publish it so main stays in step
+            # with the remote and the post-merge fast-forward stays a fast-forward.
+            await self._guard(
+                f"epic {epic.number}", "push main", lambda: self.git.push(MAIN_BRANCH, set_upstream=False), ctx
+            )
+        return review.epic
+
+    @staticmethod
+    def _reviewed_epic(epic: Epic, checkpoint: dict[str, Any], workspace: Any) -> Epic:
+        """The epic as the human left it, from the saved review (or, failing that, the lock)."""
+        by_id = {story.id: story for story in epic.stories}
+        try:
+            by_id.update({s.id: s for s in parse_stories(read_artifact(workspace, f"epic-{epic.number}-reviewed"))})
+        except EnvFailure:
+            pass  # the review was recorded but its text was not saved: the original texts stand
+        order = [str(sid) for sid in checkpoint.get("story_order", epic.story_ids)]
+        return Epic(epic.number, epic.title, tuple(by_id[sid] for sid in order if sid in by_id))
+
+    def _recorded_epic(self, epic: Epic, recorder: ProvenanceRecorder, workspace: Any) -> Epic:
+        """A started epic: the stories it was started with, in the order it was started with."""
+        record = recorder.lock.read()["epics"][f"epic-{epic.number}"]
+        by_id = {story.id: story for story in epic.stories}
+        try:
+            by_id.update({s.id: s for s in parse_stories(read_artifact(workspace, f"epic-{epic.number}-reviewed"))})
+        except EnvFailure:
+            pass
+        ids = [str(sid) for sid in record.get("story_ids", epic.story_ids)]
+        return Epic(epic.number, epic.title, tuple(by_id[sid] for sid in ids if sid in by_id))
 
     @staticmethod
     def _check_cancel(ctx: RunContext, before: str) -> None:
@@ -375,6 +461,7 @@ class ImplementationStage:
         recovery: Recovery,
         duration_seconds: float,
         recorder: ProvenanceRecorder,
+        recovered: bool = False,
     ) -> None:
         """Commit a story whose tests passed: its changes plus its lock entry, in one commit.
 
@@ -398,6 +485,7 @@ class ImplementationStage:
             kind=recovery.kind,
             failure=recovery.failure,
             intervention=recovery.intervention,
+            recovered=recovered,
         )
 
     # ---------------------------------------------------------------- one epic
@@ -411,8 +499,20 @@ class ImplementationStage:
         starts, so the branch exists on the remote even if the first session never finishes.
         """
         branch = epic_branch_name(epic)
-        await self._require_clean_main(epic)
-        await self.git.create_branch(branch, base=MAIN_BRANCH)
+        if await self.git.branch_exists(branch):
+            # A crash after the branch was created and before it was recorded. Reuse it, but only
+            # if it holds nothing of anyone's work (a `foundry: resumed` record is not work).
+            if [s for s in await self.git.subjects_ahead(branch) if not s.startswith("foundry: resumed")]:
+                raise EnvFailure(
+                    f"branch {branch} already exists with commits that foundry.lock does not "
+                    f"record. Rename or delete it, then resume."
+                )
+            if await self.git.current_branch() != branch:
+                await self._require_clean_main(epic)
+                await self.git.checkout(branch)
+        else:
+            await self._require_clean_main(epic)
+            await self.git.create_branch(branch, base=MAIN_BRANCH)
         await recorder.record_epic_branch(
             epic.number, epic.title, branch, MAIN_BRANCH, epic.story_ids
         )
@@ -448,34 +548,138 @@ class ImplementationStage:
         )
         self.say(f"Epic {epic.number}: opened {pr.url}; waiting for CI")
 
-        ci = await self._guard(scope, "wait for CI", lambda: self.git.poll_ci(pr.head_sha), ctx)
-        if not ci.passed:
-            current = [pr]
-
-            async def recheck() -> CIResult:
-                fresh = await self._guard(
-                    scope, "read pull request", lambda: self.git.pull_request(pr.number), ctx
-                )
-                current[0] = fresh
-                return await self._guard(
-                    scope, "wait for CI", lambda: self.git.poll_ci(fresh.head_sha), ctx
-                )
-
-            ci = await self.failures.on_ci_failure(epic, ci, pr, ctx, recheck)
-            pr = current[0]
+        if pr.merged:
+            # Found again after a crash between the merge and its record: nothing left to wait for.
+            ci = CIResult(True, ("merged before the run resumed",))
+            merge_sha = pr.merge_sha
+            self.say(f"Epic {epic.number}: {pr.url} was already merged")
+        else:
+            ci = await self._guard(scope, "wait for CI", lambda: self.git.poll_ci(pr.head_sha), ctx)
             if not ci.passed:
-                raise CIFailure(
-                    f"CI still fails on {pr.url} after recovery: " + "; ".join(ci.failures),
-                    {"epic": epic.number, "pull_request": pr.number},
-                )
+                current = [pr]
 
-        title = f"Merge epic {epic.number}: {epic.title} (#{pr.number})"
-        merge = await self._guard(scope, "merge pull request", lambda: self.git.merge_pr(pr.number, title), ctx)
+                async def recheck() -> CIResult:
+                    fresh = await self._guard(
+                        scope, "read pull request", lambda: self.git.pull_request(pr.number), ctx
+                    )
+                    current[0] = fresh
+                    return await self._guard(
+                        scope, "wait for CI", lambda: self.git.poll_ci(fresh.head_sha), ctx
+                    )
+
+                ci = await self.failures.on_ci_failure(epic, ci, pr, ctx, recheck)
+                pr = current[0]
+                if not ci.passed:
+                    raise CIFailure(
+                        f"CI still fails on {pr.url} after recovery: " + "; ".join(ci.failures),
+                        {"epic": epic.number, "pull_request": pr.number},
+                    )
+            title = f"Merge epic {epic.number}: {epic.title} (#{pr.number})"
+            merge = await self._guard(
+                scope, "merge pull request", lambda: self.git.merge_pr(pr.number, title), ctx
+            )
+            merge_sha = merge.sha
         await self._guard(scope, "update main", lambda: self.git.sync_branch(MAIN_BRANCH), ctx)
-        await recorder.record_epic_merged(epic.number, pr, ci, merge.sha)
+        await recorder.record_epic_merged(epic.number, pr, ci, merge_sha)
         await self._guard(scope, "push main", lambda: self.git.push(MAIN_BRANCH, set_upstream=False), ctx)
         self.say(f"Epic {epic.number}: merged")
         return pr
+
+    async def rejoin_epic(
+        self, epic: Epic, command: str, ctx: RunContext, recorder: ProvenanceRecorder
+    ) -> str:
+        """Back onto a started epic's branch after an interruption (AD-6).
+
+        Changes left in the working tree by the interrupted story are judged by the tests: green
+        means the session finished and only the commit was lost, so it is committed as that story;
+        red means it did not, so the changes are set aside (stashed, not lost) and the story runs
+        again. A clean tree means the next story simply starts. At worst one story is re-run.
+        """
+        branch = epic_branch_name(epic)
+        recorded = recorder.lock.read()["epics"][f"epic-{epic.number}"].get("branch", branch)
+        branch = str(recorded)
+        dirty = not await self.git.is_clean()
+        if await self.git.current_branch() != branch:
+            if dirty:
+                files = ", ".join((await self.git.dirty_files())[:5])
+                raise EnvFailure(
+                    f"cannot continue epic {epic.number} on {branch}: the working tree has "
+                    f"uncommitted changes ({files}) on another branch. Commit or discard them first."
+                )
+            await self.git.switch_to_branch(branch)
+        await self._guard(f"epic {epic.number}", "push epic branch", lambda: self.git.push(branch), ctx)
+
+        if dirty:
+            todo = [s for s in epic.stories if s.id not in self._settled(recorder)]
+            if not todo:
+                files = ", ".join((await self.git.dirty_files())[:5])
+                raise EnvFailure(
+                    f"every story of epic {epic.number} is recorded, but the working tree has "
+                    f"uncommitted changes ({files}). Commit or discard them first."
+                )
+            story = todo[0]
+            self.say(f"  Story {story.id} was interrupted; running the tests on what it left behind")
+            result = await self.run_test_gate(command, ctx)
+            if result.passed:
+                await self.commit_story(story, Recovery(result), 0.0, recorder, recovered=True)
+                self.say(f"  Story {story.id} committed ({result.tests_passed or '?'} tests passed)")
+            else:
+                await self.git.stash(f"foundry: story {story.id} discarded on resume")
+                self.say(f"  Story {story.id} left failing tests; its changes are in `git stash` and it runs again")
+        return branch
+
+    async def consistency_pass(
+        self, ctx: RunContext, recorder: ProvenanceRecorder, command: str, architecture: str
+    ) -> None:
+        """After a model change, one dedicated session normalises style across the codebase (FR-34).
+
+        It runs between epics, on `main`, once for every change since the last pass, and is
+        skipped when the model never changed. It must not change behaviour: if the tests are no
+        longer green afterwards its changes are set aside (stashed) and the pass is recorded as
+        reverted, because a cosmetic pass is never worth a broken build.
+        """
+        data = recorder.lock.read()
+        pending = progress_from_lock(data)
+        change = pending.pending_model_change if pending else None
+        if change is None:
+            return
+        if await self.git.current_branch() != MAIN_BRANCH or not await self.git.is_clean():
+            raise EnvFailure(
+                "the consistency pass needs a clean working tree on main, between epics."
+            )
+        total, done = change.stories_total, change.stories_completed
+        self.say(f"Consistency pass: {change.original_model} -> {change.new_model} (model boundary at story {done}/{total})")
+        prompt = build_consistency_prompt(change.original_model, change.new_model, command, architecture)
+        request = AgentRequest(name="consistency pass", prompt=prompt)
+        await self._guard(
+            "the consistency pass", "consistency pass session",
+            lambda: self.runner.run(request, ctx), ctx,
+        )
+        self.say("")
+        common = dict(
+            through_change=change.through_change,
+            original_model=change.original_model,
+            new_model=change.new_model,
+            boundary_story=change.boundary_story,
+            completed=done,
+            total=total,
+        )
+        if await self.git.is_clean():
+            await recorder.record_consistency_pass(**common, outcome="no changes needed", files_changed=0)
+            return
+        result = await self.run_test_gate(command, ctx)
+        if not result.passed:
+            await self.git.stash("foundry: consistency pass reverted (tests failed)")
+            self.say("  The consistency pass broke the tests, so its changes were set aside in `git stash`.")
+            await recorder.record_consistency_pass(**common, outcome="reverted: tests failed", files_changed=0)
+            return
+        await self.git.stage_all()
+        files = len(await self.git.staged_files())
+        await recorder.record_consistency_pass(**common, outcome="applied", files_changed=files, paths=None)
+        await self._guard(
+            "the consistency pass", "push main",
+            lambda: self.git.push(MAIN_BRANCH, set_upstream=False), ctx,
+        )
 
     async def _require_clean_main(self, epic: Epic) -> None:
         current = await self.git.current_branch()
@@ -490,6 +694,33 @@ class ImplementationStage:
                 f"cannot start epic {epic.number}: the working tree has uncommitted changes "
                 f"({dirty}). Commit or discard them first."
             )
+
+
+def build_consistency_prompt(
+    original_model: str, new_model: str, test_command: str, architecture: str
+) -> str:
+    return (
+        "# Task: consistency pass\n\n"
+        "You are running non-interactively inside Foundry: no one can answer questions.\n\n"
+        f"This project was built by `{original_model}` and the rest of it is now being built by "
+        f"`{new_model}`. Review the whole codebase in the current directory and make it read as if "
+        "one person wrote it.\n\n"
+        "Focus on:\n"
+        "- naming conventions (files, functions, classes, variables, tests);\n"
+        "- formatting and import order;\n"
+        "- comment and docstring style.\n\n"
+        "Rules:\n"
+        "- Do NOT change behaviour or logic, add features or remove tests. Renames must update "
+        "every use.\n"
+        f"- The project's test command is `{test_command}`; it must still exit 0 when you finish.\n"
+        "- Prefer the conventions already used most in the codebase and the architecture below.\n"
+        "- Do not run `git commit`, `git push` or change branches: Foundry commits for you.\n"
+        "- Do not edit `foundry.lock` or anything under `.foundry/`.\n"
+        "- If the code is already consistent, change nothing.\n"
+        "- Your final message is a short summary of what you changed.\n\n"
+        "## Architecture\n\n"
+        f"{architecture.strip()}\n"
+    )
 
 
 def _pr_body(epic: Epic, deferred: Sequence[Story] = ()) -> str:

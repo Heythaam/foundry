@@ -122,6 +122,7 @@ class FakeGitHub:
             "title": pull["title"],
             "html_url": f"https://github.com/{full}/pull/{number}",
             "url": f"{self.url}/repos/{full}/pulls/{number}",
+            "merge_commit_sha": pull.get("merge_sha"),
             "head": {"ref": pull["head"], "sha": pull["sha"]},
             "base": {"ref": pull["base"]},
         }
@@ -139,6 +140,7 @@ class FakeGitHub:
             sha = _git(work, "rev-parse", "HEAD")
             _git(work, "push", "--quiet", "origin", pull["base"])
         pull["merged"] = True
+        pull["merge_sha"] = sha
         return 200, {"merged": True, "sha": sha, "message": "Pull Request successfully merged"}
 
     def _route(self, method: str, path: str, body: dict[str, Any]) -> tuple[int, Any]:
@@ -168,11 +170,9 @@ class FakeGitHub:
 
         if method == "GET" and rest == "":
             return 200, self._repo_json(repo)
-        if method == "GET" and rest == "/pulls":  # open PRs (the query string is ignored)
+        if method == "GET" and rest == "/pulls":  # every PR (the query string is ignored)
             return 200, [
-                self._pull_json(n)
-                for n, pull in self.pulls.items()
-                if pull["repo"] == repo and not pull["merged"]
+                self._pull_json(n) for n, pull in reversed(self.pulls.items()) if pull["repo"] == repo
             ]
         if method == "POST" and rest == "/pulls":
             try:
