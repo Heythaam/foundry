@@ -88,6 +88,16 @@ class MergeResult:
 # ---------------------------------------------------------------------------- git
 
 
+# Wording differs between git builds and libcurl versions; all of these are the network's fault.
+_GIT_NETWORK_ERROR = re.compile(
+    r"Could not resolve host|Failed to connect to|Could not connect to server|"
+    r"Couldn't connect to server|Connection (?:timed out|reset|refused)|Operation timed out|"
+    r"SSL_ERROR_SYSCALL|RPC failed|early EOF|the remote end hung up unexpectedly|"
+    r"The requested URL returned error: (?:5\d\d|429)|unable to access .*(?:50\d|timed out)",
+    re.IGNORECASE,
+)
+
+
 async def _run_git_raw(
     workspace: Path, *args: str, env: Mapping[str, str] | None = None, secret: str | None = None
 ) -> bytes:
@@ -110,13 +120,9 @@ async def _run_git_raw(
 
     if proc.returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip()
+        infra = _GIT_NETWORK_ERROR.search(detail)  # before scrubbing: the secret may be anything
         if secret:
             detail = detail.replace(secret, "***")
-        infra = re.search(
-            r"Could not resolve host|Connection (?:timed out|reset|refused)|"
-            r"unable to access .*(?:50\d|timed out)|The requested URL returned error: 5\d\d",
-            detail,
-        )
         error_cls = InfraFailure if infra else GitError
         raise error_cls(
             f"git {args[0]} failed (exit {proc.returncode}): {detail}",
@@ -213,6 +219,15 @@ class GitOps:
 
     async def discard_staged(self) -> None:
         await run_git(self.workspace, "reset", "--quiet")
+
+    async def working_diff(self) -> str:
+        """Every change in the working tree since the last commit, new files included."""
+        await self.stage_all()
+        return await run_git(self.workspace, "diff", "--cached", "--no-color")
+
+    async def stash(self, message: str) -> None:
+        """Set the working-tree changes (untracked files too) aside without losing them."""
+        await run_git(self.workspace, "stash", "push", "--quiet", "--include-untracked", "-m", message)
 
     async def is_clean(self) -> bool:
         await self.ensure_repo()
@@ -348,10 +363,25 @@ class GitOps:
         full_name = self._require_repo()
 
         def call(gh: Any) -> PullRequestInfo:
-            pr = gh.get_repo(full_name).create_pull(title=title, body=body, head=head, base=base)
+            repo = gh.get_repo(full_name)
+            # A retry after a timeout must not open a second PR if the first one got through.
+            for existing in repo.get_pulls(state="open", base=base):
+                if existing.head.ref == head:
+                    return PullRequestInfo(existing.number, existing.html_url, head, existing.head.sha)
+            pr = repo.create_pull(title=title, body=body, head=head, base=base)
             return PullRequestInfo(pr.number, pr.html_url, head, pr.head.sha)
 
         return await self._github(call, f"open a pull request from {head!r}")
+
+    async def pull_request(self, number: int) -> PullRequestInfo:
+        """The PR as it is now: its head moves when someone pushes to the branch."""
+        full_name = self._require_repo()
+
+        def call(gh: Any) -> PullRequestInfo:
+            pr = gh.get_repo(full_name).get_pull(number)
+            return PullRequestInfo(pr.number, pr.html_url, pr.head.ref, pr.head.sha)
+
+        return await self._github(call, f"read pull request #{number}")
 
     async def poll_ci(self, sha: str) -> CIResult:
         """Wait for every check on `sha` to finish; red if any failed, InfraFailure on timeout."""
