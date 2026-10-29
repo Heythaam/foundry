@@ -15,7 +15,7 @@ from foundry.artifacts import read_artifact
 from foundry.context import EnvFailure, RunContext, sha256_of
 from foundry.gitops import MAIN_BRANCH, GitOps, RepoExists, RepoInfo
 from foundry.provenance import ProvenanceRecorder
-from foundry.scaffold import PLANNING_PHASES, project_name, scaffold_files, slugify
+from foundry.scaffold import PLANNING_PHASES, QUICK_PHASES, project_name, scaffold_files, slugify
 
 MAX_NAME_ATTEMPTS = 3
 
@@ -73,13 +73,16 @@ class RepoStage:
         command = lock.test_runner()
         if command is None:
             raise EnvFailure(
-                "foundry.lock has no [run.test_runner]; the architecture must be approved "
-                "with a '## Test Runner' section before a repository is created."
+                "foundry.lock has no [run.test_runner]; the "
+                + ("spec must be approved with a '## Test strategy' command" if ctx.mode == "quick"
+                   else "architecture must be approved with a '## Test Runner' section")
+                + " before a repository is created."
             )
 
+        phases = QUICK_PHASES if ctx.mode == "quick" else PLANNING_PHASES
         documents = {
             phase: await asyncio.to_thread(read_artifact, ctx.workspace_path, phase)
-            for phase in PLANNING_PHASES
+            for phase in phases
         }
         title = project_name(documents, ctx.idea)
         holder = await self.git.user_name() or f"{title} authors"

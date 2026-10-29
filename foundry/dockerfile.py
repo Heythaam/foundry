@@ -279,7 +279,11 @@ def deployment_files(paths: Sequence[str]) -> list[str]:
 
 
 def build_dockerfile_prompt(
-    architecture: str, test_command: str, build: BuildStep, problems: Sequence[str] = ()
+    architecture: str,
+    test_command: str,
+    build: BuildStep,
+    problems: Sequence[str] = (),
+    source: str = "architecture",
 ) -> str:
     """The whole task in one file (AD-7), plus what was wrong with the last try, if there was one."""
     if build.present:
@@ -296,9 +300,9 @@ def build_dockerfile_prompt(
         "# Task: write the project's Dockerfile\n\n"
         "You are running non-interactively inside Foundry: no one can answer questions. Where you "
         "would ask, choose the most reasonable answer and note it in your final message.\n\n"
-        "Every story of this project is implemented and merged. Read the code in the current "
-        "directory and write a production-ready `Dockerfile` at its root, for the tech stack the "
-        "architecture below names.\n\n"
+        "Everything this project was asked to do is implemented and merged. Read the code in the "
+        "current directory and write a production-ready `Dockerfile` at its root, for the tech "
+        f"stack the {source} below names.\n\n"
         "Requirements:\n"
         f"- {shape}\n"
         "- Use a standard, version-pinned base image for the language and framework (never "
@@ -322,7 +326,7 @@ def build_dockerfile_prompt(
             "Your files from that attempt are still in the working tree. Fix these and nothing "
             f"else:\n\n{listed}\n"
         )
-    return prompt + f"\n## Architecture\n\n{architecture.strip()}\n"
+    return prompt + f"\n## {source.capitalize()}\n\n{architecture.strip()}\n"
 
 
 # ------------------------------------------------------------------------------- the stage
@@ -366,12 +370,17 @@ class DockerfileStage:
             # Generated before a restart. Nothing to redo; make sure main reached the remote.
             await self._publish(ctx)
             return
-        self._require_finished_epics(progress)
+        quick = ctx.mode == "quick"
+        if quick:
+            self._require_finished_increments(recorder.lock.read())
+        else:
+            self._require_finished_epics(progress)
         command = recorder.lock.test_runner()
         if command is None:
             raise EnvFailure("foundry.lock has no [run.test_runner]; there is nothing to gate on.")
         workspace = ctx.workspace_path
-        architecture = await asyncio.to_thread(read_artifact, workspace, "architecture")
+        source = "spec" if quick else "architecture"  # the document that names the tech stack
+        architecture = await asyncio.to_thread(read_artifact, workspace, source)
         await self._require_main()
 
         build = await asyncio.to_thread(detect_build_step, workspace, architecture)
@@ -382,7 +391,7 @@ class DockerfileStage:
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if is_cancel_requested(workspace):
                 raise CancelRequested("dockerfile generation")
-            prompt = build_dockerfile_prompt(architecture, command, build, problems)
+            prompt = build_dockerfile_prompt(architecture, command, build, problems, source)
             request = AgentRequest(name=SESSION_NAME, prompt=prompt)
             await self._guard(
                 "the Dockerfile", "dockerfile session", lambda: self.runner.run(request, ctx), ctx
@@ -442,6 +451,22 @@ class DockerfileStage:
             raise EnvFailure(
                 f"the Dockerfile is generated after every epic is merged, but {what}.",
                 fix="Run `foundry resume` to finish the implementation first.",
+            )
+
+    @staticmethod
+    def _require_finished_increments(data: dict) -> None:
+        from foundry.quick import quick_progress  # quick imports the implementation stage
+
+        progress = quick_progress(data)
+        if not progress.planning_done or progress.remaining:
+            what = (
+                f"increment {progress.remaining[0]} is not done"
+                if progress.remaining
+                else "the increments have not been planned"
+            )
+            raise EnvFailure(
+                f"the Dockerfile is generated after every increment is committed, but {what}.",
+                fix="Quick runs cannot be resumed; run `foundry quick` again in a new directory.",
             )
 
     async def _require_main(self) -> None:

@@ -169,6 +169,7 @@ class LockFile:
                 "idea_hash": ctx.idea_hash,
                 "model": ctx.model_id,
                 "started_at": iso_utc(ctx.start_time),
+                "mode": ctx.mode,
                 "review_epics": ctx.review_epics,
                 "status": STATUS_IN_PROGRESS,
             },

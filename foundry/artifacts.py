@@ -20,7 +20,7 @@ ARTIFACTS_DIRNAME = "artifacts"
 
 # The phases whose approved output is kept on disk. Pre-flight's report is not: it is
 # regenerated from the PRD and has no later consumer.
-PERSISTED_PHASES = frozenset({"brainstorm", "prd", "architecture", "epics"})
+PERSISTED_PHASES = frozenset({"brainstorm", "prd", "architecture", "epics", "spec"})
 
 
 def artifact_path(workspace: Path, phase: str) -> Path:

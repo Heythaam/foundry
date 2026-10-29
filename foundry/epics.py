@@ -33,6 +33,11 @@ class Story:
     def id(self) -> str:
         return f"{self.epic}.{self.number}"
 
+    @property
+    def lock_key(self) -> str:
+        """Where this story's records live in the lock: `epic-1.story-2`."""
+        return f"epic-{self.epic}.story-{self.number}"
+
 
 @dataclass(frozen=True)
 class Epic:
