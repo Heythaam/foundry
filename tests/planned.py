@@ -304,3 +304,107 @@ async def started_epic(
     epic = parse_epics(epics)[0]
     branch = await stage.start_epic(epic, ctx, recorder)
     return ctx, recorder, gitops, stage, epic, branch
+
+
+# ------------------------------------------------------------------- resume (Epic 5)
+
+
+class Crash(BaseException):
+    """A process dying. A BaseException so no `except Exception` in foundry can tidy up after it."""
+
+
+class AlwaysAvailable:
+    """ModelChecker for a model that is still there."""
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    async def check(self, model_id: str):
+        from foundry.models import ModelAvailability
+
+        self.asked.append(model_id)
+        return ModelAvailability(True)
+
+
+async def resume_run(
+    workspace: Path,
+    runner,
+    *,
+    checker=None,
+    prompt=None,
+    said: list[str] | None = None,
+    **stage_kwargs,
+):
+    """`foundry resume` without the CLI: context from the lock, the stages, the coordinator."""
+    from foundry.gitops import GitOps
+    from foundry.implementation import ImplementationStage
+    from foundry.orchestrator import Orchestrator
+    from foundry.repo import RepoStage
+    from foundry.resume import ResumeCoordinator, context_from_lock
+    from tests.helpers import ScriptedCheckpoint
+
+    ctx = context_from_lock(workspace)
+    gitops = quiet(GitOps.from_env(workspace, require_token=True))
+    stages = [
+        RepoStage(gitops, ScriptedNamePrompt()),
+        ImplementationStage(
+            gitops, runner, on_test_output=lambda t: None, say=lambda t: None, **stage_kwargs
+        ),
+    ]
+    coordinator = ResumeCoordinator(
+        ctx,
+        gitops,
+        checker or AlwaysAvailable(),
+        prompt,
+        say=(said.append if said is not None else (lambda t: None)),
+    )
+    orchestrator = Orchestrator([], checkpoint=ScriptedCheckpoint(), stages=stages, gitops=gitops)
+    result = await orchestrator.resume(ctx, coordinator.prepare)
+    return ctx, result, coordinator
+
+
+class RecordingRunner(ImplementingRunner):
+    """Remembers the model each session ran on; consistency passes change nothing by default."""
+
+    def __init__(self, files=None) -> None:
+        super().__init__(files)
+        self.models: list[tuple[str, str]] = []  # (session name, model id)
+        self.consistency_files: dict[str, str] = {}  # written by a consistency pass, if set
+        self.consistency_prompts: list[str] = []
+
+    async def run(self, request, ctx):
+        self.models.append((request.name, ctx.model_id))
+        if request.name == "consistency pass":
+            self.consistency_prompts.append(request.prompt)
+            for relative, text in self.consistency_files.items():
+                target = ctx.workspace_path / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+            return AgentResult(text="normalised")
+        return await super().run(request, ctx)
+
+
+class ScriptedModelPrompt:
+    """ModelPrompt that picks a fixed model and records what it was shown."""
+
+    def __init__(self, choice: str) -> None:
+        self.choice = choice
+        self.shown: list[tuple[str, tuple[str, ...]]] = []
+
+    async def choose(self, unavailable: str, alternatives) -> str:
+        self.shown.append((unavailable, tuple(alternatives)))
+        return self.choice
+
+
+class ModelGone:
+    """ModelChecker for a retired model, with some alternatives."""
+
+    def __init__(self, alternatives=("claude-sonnet-5-0", "claude-opus-5-0")) -> None:
+        self.alternatives = tuple(alternatives)
+        self.asked: list[str] = []
+
+    async def check(self, model_id: str):
+        from foundry.models import ModelAvailability
+
+        self.asked.append(model_id)
+        return ModelAvailability(False, self.alternatives)
