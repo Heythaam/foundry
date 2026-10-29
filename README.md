@@ -3,12 +3,13 @@
 Foundry takes an idea through a human-checkpointed pipeline and records every step as
 tamper-evident provenance in two places at once: `foundry.lock` and git history.
 
-> **Status:** Epics 1-6 (core infrastructure, the planning pipeline, repo creation and the
-> implementation loop, failure handling, resume and recovery, the Dockerfile). `foundry pro` plans
+> **Status:** Epics 1-7 (core infrastructure, the planning pipeline, repo creation and the
+> implementation loop, failure handling, resume and recovery, the Dockerfile, quick mode).
+> `foundry pro` plans
 > (brainstorm -> PRD -> pre-flight -> architecture -> epics/stories, each with a human checkpoint),
 > creates a GitHub repo, builds every story in its own Claude Code session, merges one PR per epic,
-> then commits a Dockerfile to `main` and marks the run complete. `foundry cancel`, `resume` and
-> `status` work; `quick` is a stub. Failed stories are retried once, flaky API calls are backed
+> then commits a Dockerfile to `main` and marks the run complete. `foundry quick` skips the planning
+> and builds from a one-page spec instead. `foundry cancel`, `resume` and `status` work. Failed stories are retried once, flaky API calls are backed
 > off, persistent failures are escalated to you in `$EDITOR`, and environment failures stop the
 > run with what to fix.
 
@@ -29,6 +30,7 @@ foundry --help
 foundry pro "build a todo app"                  # run the planning pipeline in the current directory
 foundry pro "build a todo app" --review-epics   # also pause before each epic starts
 foundry pro "build a todo app" --private        # create the GitHub repo as private (default: public)
+foundry quick "a URL shortener"                 # skip planning: one-page spec, then build it
 foundry cancel                                  # from another terminal: stop after the current phase
 ```
 
@@ -167,6 +169,35 @@ progress, and `foundry resume` tries again. A Dockerfile that passes is committe
 pushed. The run is then marked complete: `[completed]` is appended after `[dockerfile]` and is the
 last section in the lock. Foundry does not run `docker build`; Docker is not required.
 
+### Quick mode (Epic 7)
+
+`foundry quick "<idea>"` is the short path for a small utility. It invokes no BMad agent and has no
+epics, pull requests or CI waits.
+
+1. **Spec.** One Claude Code session writes a one-page spec: `## Feature list`, `## Not building`,
+   `## Data model`, `## Test strategy` (with the one command that runs the whole suite in a fenced
+   block) and `## Assumptions`. It opens in `$EDITOR` as a checkpoint; edit it, save, close. A spec
+   missing the feature list, the data model or the test command is rejected before you see it, and
+   deleting the test command while editing stops the run with nothing recorded. The test command
+   becomes `[run.test_runner]`, exactly as in Pro mode.
+2. **Repository.** Only after you approve does Foundry create and scaffold the GitHub repository,
+   with the same code as Pro mode. The spec is committed as `docs/planning/spec.md`, and the
+   repository is named after its title. `foundry.lock` records `mode = "quick"` in `[run]` (Pro runs
+   record `"pro"`).
+3. **Increments.** A planning session cuts the approved spec into three to eight ordered increments
+   (data model, logic, interface, configuration...), committed as `docs/planning/increments.md`
+   with an `[increments]` entry. Each increment then gets its own Claude Code session and the same
+   test gate, automatic retry and `$EDITOR` escalation as a Pro mode story. **No commit lands
+   without green tests.** Each one is committed on `main` and pushed straight away as
+   `foundry: story Q.N implemented — <title>`, with its `[implementation.quick.story-N]` entry
+   (diff hash, tests passed, duration, retries) in the same commit.
+4. **Dockerfile.** The finalization from Epic 6 runs next, writing the Dockerfile from the spec, and
+   the run is marked complete.
+
+A quick run cannot be resumed (`foundry resume` says so and `foundry status` shows how far it got):
+`resume` works from the approved epic plan a quick run does not have. A cancelled or failed quick
+run is started again in a new directory. `--review-epics` does not apply.
+
 ### Pre-flight
 
 After the PRD, pre-flight reports contradictions, missing topics (authentication, error
@@ -210,6 +241,7 @@ recorded in the lock as `[run.test_runner]`.
 | `progress.py` | Where a run stands, computed from the lock alone (shared by resume and status) |
 | `resume.py` | `ResumeCoordinator`: validates, repairs crash leftovers, rebuilds the state buffer, checks the model, records `foundry: resumed` |
 | `status.py` | `foundry status` output |
+| `quick.py` | Quick mode: `SpecPhase`, the increment plan, `QuickImplementationStage` |
 | `dockerfile.py` | `DockerfileStage`: build-step detection, the Dockerfile session, its checks, the commit |
 | `models.py` | Model availability check (Models API) and the replacement-model prompt |
 | `failures.py` | Failure policy: classifier, backoff, one-shot code retry, `$EDITOR` escalation, fix hints |
@@ -228,7 +260,8 @@ named sections (`[artifacts.prd]`, `[checkpoints.prd]`, `[checkpoints.prd.revisi
 `[run.test_runner]`, `[plan]`, `[repo]`, `[scaffold]`, `[epics.epic-1]`, `[epics.epic-1.merged]`,
 `[implementation.epic-1.story-1]`, `[failures.epic-1.story-1]`, `[interventions.epic-1.story-1]`,
 `[deferred.epic-1.story-1]`, `[halts.halt-1]`, `[resumes.resume-1]`, `[model_changes.change-1]`,
-`[consistency.pass-1]`, `[dockerfile]`, `[cancelled]`, `[cancelled.cancel-2]`, `[completed]`), so a run's
+`[consistency.pass-1]`, `[dockerfile]`, and in quick mode `[artifacts.spec]`, `[increments]`,
+`[implementation.quick.story-1]`, `[cancelled]`, `[cancelled.cancel-2]`, `[completed]`), so a run's
 end is recorded by appending a section rather than by changing `[run].status`. A run is
 "in progress" while `[run]` exists and neither `[cancelled]` nor `[completed]` does.
 

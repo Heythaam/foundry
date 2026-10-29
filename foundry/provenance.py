@@ -202,7 +202,7 @@ class ProvenanceRecorder:
         A failure and an intervention, if any, are recorded in the same commit.
         """
         message = story_commit_message(story, kind)
-        epic_story = f"epic-{story.epic}.story-{story.number}"
+        epic_story = story.lock_key
         sections: list[tuple[str, dict[str, Any]]] = []
         if failure is not None:
             sections.append(
@@ -257,7 +257,7 @@ class ProvenanceRecorder:
 
         The story's changes, if any, stay out of this commit; it holds foundry.lock alone.
         """
-        epic_story = f"epic-{story.epic}.story-{story.number}"
+        epic_story = story.lock_key
         sections: list[tuple[str, dict[str, Any]]] = []
         if failure is not None:
             sections.append(
@@ -378,6 +378,23 @@ class ProvenanceRecorder:
             paths=paths,
         )
         return section
+
+    async def record_increment_plan(
+        self, fields: dict[str, Any], paths: Sequence[str]
+    ) -> str:
+        """Append [increments] (quick mode, FR-36): how the spec was cut into increments.
+
+        The manifest plays the part `[plan]` plays in Pro mode. The plan document itself is
+        committed with the entry, so the lock holds only its hash (NFR-7).
+        """
+        await self._record(
+            action="increments planned",
+            detail=f"{fields['count']} increments",
+            section="increments",
+            fields={**fields, "planned_at": iso_utc(utc_now())},
+            paths=[*paths, LOCK_FILENAME],
+        )
+        return "increments"
 
     async def record_dockerfile(self, fields: dict[str, Any]) -> str:
         """Append [dockerfile] (FR-30) and commit it with the Dockerfile itself.

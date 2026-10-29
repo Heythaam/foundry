@@ -34,7 +34,8 @@ def _stub_cli_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     from foundry.phases import StubPhase
 
     monkeypatch.setattr("foundry.cli._default_phases", lambda: [StubPhase()])
-    monkeypatch.setattr("foundry.cli._build_stages", lambda *args: ([], None))
+    monkeypatch.setattr("foundry.cli._quick_phases", lambda: [StubPhase()])
+    monkeypatch.setattr("foundry.cli._build_stages", lambda *args, **kwargs: ([], None))
 
 
 _FAKE_CLAUDE = r'''

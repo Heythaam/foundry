@@ -112,16 +112,19 @@ checkout, so it must also install the project's dependencies first. Example:
     ```"""
 
 
-def extract_test_runner(architecture: str) -> str:
+def extract_test_runner(
+    architecture: str, section_title: str = TEST_RUNNER_SECTION, document: str = "architecture"
+) -> str:
     """Pull the single test command out of the `## Test Runner` section (FR-9).
 
-    Raises CodeFailure with a fix the human can act on; never guesses at multi-line input.
+    Quick mode's spec keeps it under `## Test strategy` (FR-35). Raises CodeFailure with a fix
+    the human can act on; never guesses at multi-line input.
     """
     architecture = architecture.replace("\r\n", "\n")  # Windows editors save CRLF
-    section = _section_body(architecture, TEST_RUNNER_SECTION)
+    section = section_body(architecture, section_title)
     if section is None:
         raise CodeFailure(
-            f"The architecture has no '## {TEST_RUNNER_SECTION}' section. Add one containing a "
+            f"The {document} has no '## {section_title}' section. Add one containing a "
             "fenced code block with the single command that runs the whole test suite."
         )
     fenced = _FENCE_RE.search(section)
@@ -130,11 +133,11 @@ def extract_test_runner(architecture: str) -> str:
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
     if not lines:
         raise CodeFailure(
-            f"The '## {TEST_RUNNER_SECTION}' section has no command; put it in a fenced code block."
+            f"The '## {section_title}' section has no command; put it in a fenced code block."
         )
     if len(lines) > 1:
         raise CodeFailure(
-            f"The '## {TEST_RUNNER_SECTION}' section has {len(lines)} lines; it must be exactly "
+            f"The '## {section_title}' section has {len(lines)} lines; it must be exactly "
             "one command (chain steps with && if needed)."
         )
     command = lines[0].removeprefix("$ ").strip()
@@ -145,7 +148,7 @@ def extract_test_runner(architecture: str) -> str:
     return command
 
 
-def _section_body(text: str, title: str) -> str | None:
+def section_body(text: str, title: str) -> str | None:
     """Body of the first heading called `title`, up to the next heading of equal or higher rank."""
     headings = list(_HEADING_RE.finditer(text))
     for index, heading in enumerate(headings):

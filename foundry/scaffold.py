@@ -14,6 +14,7 @@ from collections.abc import Mapping
 CI_WORKFLOW_PATH = ".github/workflows/ci.yml"
 PLANNING_DIR = "docs/planning"
 PLANNING_PHASES = ("brainstorm", "prd", "architecture", "epics")
+QUICK_PHASES = ("spec",)  # quick mode plans with one document (FR-35)
 
 DEFAULT_REPO_NAME = "foundry-project"
 _MAX_SLUG_LENGTH = 60  # GitHub allows 100; shorter names are friendlier to type
@@ -21,7 +22,7 @@ _MAX_SLUG_LENGTH = 60  # GitHub allows 100; shorter names are friendlier to type
 _H1_RE = re.compile(r"^#[ \t]+(.+?)[ \t]*#*[ \t]*$", re.MULTILINE)
 _DOC_WORDS_RE = re.compile(
     r"\b(?:product requirements document|requirements document|prd|epic breakdown|"
-    r"epics and stories|architecture (?:spine|document))\b",
+    r"epics and stories|architecture (?:spine|document)|one-page spec)\b",
     re.IGNORECASE,
 )
 
@@ -38,7 +39,7 @@ def slugify(text: str, max_length: int = _MAX_SLUG_LENGTH) -> str:
 
 def project_name(documents: Mapping[str, str], idea: str) -> str:
     """The project's name: the PRD's title, else the epics' title, else the idea's first words."""
-    for phase in ("prd", "epics", "architecture"):
+    for phase in ("prd", "epics", "architecture", "spec"):
         title = _title_of(documents.get(phase, ""))
         if title:
             return title
@@ -184,14 +185,16 @@ def scaffold_files(
     year: int,
 ) -> dict[str, str]:
     """Every file of the scaffold commit except foundry.lock, keyed by repo-relative path."""
-    languages = detect_languages(test_command, documents.get("architecture", ""))
+    languages = detect_languages(
+        test_command, documents.get("architecture") or documents.get("spec", "")
+    )
     files = {
         "README.md": render_readme(name, idea, test_command),
         "LICENSE": render_license(license_holder, year),
         ".gitignore": render_gitignore(languages),
         CI_WORKFLOW_PATH: render_ci(test_command, languages),
     }
-    for phase in PLANNING_PHASES:
+    for phase in (*PLANNING_PHASES, *QUICK_PHASES):
         if phase in documents:
             files[f"{PLANNING_DIR}/{phase}.md"] = documents[phase]
     return files
