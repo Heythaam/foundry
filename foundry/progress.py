@@ -18,6 +18,7 @@ from foundry.lock import _numbered, cancellation_count, status_of
 PHASE_PLANNING = "planning"
 PHASE_REPO = "repo"
 PHASE_IMPLEMENTATION = "implementation"
+PHASE_FINALIZATION = "finalization"  # every epic is merged; the Dockerfile and completion remain
 PHASE_DONE = "done"
 
 _TIMESTAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
@@ -45,7 +46,7 @@ class RunProgress:
     run_id: str
     idea: str
     status: str  # in_progress | cancelled | completed
-    phase: str  # planning | repo | implementation | done
+    phase: str  # planning | repo | implementation | finalization | done
     model: str
     started_at: str
     review_epics: bool
@@ -62,6 +63,7 @@ class RunProgress:
     started_epics: tuple[int, ...]
     last_halt: dict[str, Any] | None = None  # the newest halt, if the run has not progressed since
     pending_model_change: PendingModelChange | None = None
+    dockerfile: dict[str, Any] | None = None  # the [dockerfile] section, once generated
     resumes: int = 0
     cancellations: int = 0
     last_artifact: str | None = field(default=None)  # the latest approved planning phase
@@ -164,6 +166,8 @@ def progress_from_lock(data: dict[str, Any], now: datetime | None = None) -> Run
         phase = PHASE_PLANNING
     elif "scaffold" not in data:
         phase = PHASE_REPO
+    elif not remaining and set(started) <= set(merged):
+        phase = PHASE_FINALIZATION
     else:
         phase = PHASE_IMPLEMENTATION
 
@@ -214,6 +218,7 @@ def progress_from_lock(data: dict[str, Any], now: datetime | None = None) -> Run
         started_epics=tuple(started),
         last_halt=last_halt,
         pending_model_change=pending_model_change(data),
+        dockerfile=dict(data["dockerfile"]) if isinstance(data.get("dockerfile"), dict) else None,
         resumes=len(_numbered(data.get("resumes"), "resume-")),
         cancellations=cancellation_count(data),
         last_artifact=approved[-1] if approved else None,

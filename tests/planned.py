@@ -333,6 +333,7 @@ async def resume_run(
     checker=None,
     prompt=None,
     said: list[str] | None = None,
+    finalize: bool = False,
     **stage_kwargs,
 ):
     """`foundry resume` without the CLI: context from the lock, the stages, the coordinator."""
@@ -351,6 +352,12 @@ async def resume_run(
             gitops, runner, on_test_output=lambda t: None, say=lambda t: None, **stage_kwargs
         ),
     ]
+    if finalize:
+        from foundry.dockerfile import DockerfileStage
+
+        stages.append(
+            DockerfileStage(gitops, runner, on_test_output=lambda t: None, say=lambda t: None)
+        )
     coordinator = ResumeCoordinator(
         ctx,
         gitops,
@@ -408,3 +415,66 @@ class ModelGone:
 
         self.asked.append(model_id)
         return ModelAvailability(False, self.alternatives)
+
+
+# ----------------------------------------------------------------- finalization (Epic 6)
+
+SINGLE_STAGE = """FROM python:3.12-slim
+WORKDIR /app
+COPY . .
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=3s CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+USER nobody
+CMD ["python", "-m", "todo"]
+"""
+
+MULTI_STAGE = """FROM node:20-alpine AS build
+WORKDIR /src
+COPY . .
+RUN npm ci && npm run build
+
+FROM node:20-alpine
+WORKDIR /app
+COPY --from=build /src/dist ./dist
+EXPOSE 3000
+HEALTHCHECK CMD wget -qO- http://localhost:3000/health || exit 1
+USER node
+CMD ["node", "dist/server.js"]
+"""
+
+NODE_PACKAGE = '{"name": "todo", "scripts": {"build": "tsc", "test": "jest"}}\n'
+
+
+class FinalizingRunner(ImplementingRunner):
+    """Writes a Dockerfile when the "dockerfile" session runs, as Claude Code would.
+
+    `dockerfiles` has one step per session (the last repeats): a dict of files to write, where a
+    value of None deletes the file, or an exception to raise.
+    """
+
+    def __init__(self, dockerfiles=None, files=None, cancel_after: str | None = None) -> None:
+        super().__init__(files)
+        self.dockerfiles = dockerfiles if dockerfiles is not None else [{"Dockerfile": SINGLE_STAGE}]
+        self.dockerfile_prompts: list[str] = []
+        self.cancel_after = cancel_after  # ask for a cancel once this story's session has run
+
+    async def run(self, request, ctx):
+        if request.name != "dockerfile":
+            result = await super().run(request, ctx)
+            if self.cancel_after and request.name == f"story {self.cancel_after}":
+                from foundry.cancel import request_cancel
+
+                request_cancel(ctx.workspace_path)
+            return result
+        self.dockerfile_prompts.append(request.prompt)
+        step = self.dockerfiles[min(len(self.dockerfile_prompts), len(self.dockerfiles)) - 1]
+        if isinstance(step, BaseException):
+            raise step
+        for relative, text in step.items():
+            target = ctx.workspace_path / relative
+            if text is None:
+                target.unlink(missing_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        return AgentResult(text="dockerfile written")

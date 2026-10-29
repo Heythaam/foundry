@@ -3,11 +3,12 @@
 Foundry takes an idea through a human-checkpointed pipeline and records every step as
 tamper-evident provenance in two places at once: `foundry.lock` and git history.
 
-> **Status:** Epics 1-5 (core infrastructure, the planning pipeline, repo creation and the
-> implementation loop, failure handling, resume and recovery). `foundry pro` plans (brainstorm -> PRD -> pre-flight -> architecture ->
-> epics/stories, each with a human checkpoint), creates a GitHub repo, then builds every story in
-> its own Claude Code session and merges one PR per epic. `foundry cancel` works; `quick`,
-> `resume` and `status` work; `quick` is a stub. Failed stories are retried once, flaky API calls are backed
+> **Status:** Epics 1-6 (core infrastructure, the planning pipeline, repo creation and the
+> implementation loop, failure handling, resume and recovery, the Dockerfile). `foundry pro` plans
+> (brainstorm -> PRD -> pre-flight -> architecture -> epics/stories, each with a human checkpoint),
+> creates a GitHub repo, builds every story in its own Claude Code session, merges one PR per epic,
+> then commits a Dockerfile to `main` and marks the run complete. `foundry cancel`, `resume` and
+> `status` work; `quick` is a stub. Failed stories are retried once, flaky API calls are backed
 > off, persistent failures are escalated to you in `$EDITOR`, and environment failures stop the
 > run with what to fix.
 
@@ -142,6 +143,30 @@ N/M` with a `[consistency.pass-N]` entry. If the tests fail afterwards, its chan
 the pass is recorded as reverted. Without an API key (or if the API cannot be reached) the check
 is skipped with a notice and the run continues on the pinned model.
 
+### Finalization: the Dockerfile (Epic 6)
+
+When the last epic has merged, one more Claude Code session writes a production-ready `Dockerfile`
+at the root of the repository, for the stack the architecture document names. Foundry checks the
+result itself rather than taking the session's word for it:
+
+- the **final stage** has a `FROM`, an `EXPOSE` with a port number and a `HEALTHCHECK ... CMD ...`
+  (an `EXPOSE` or `HEALTHCHECK` in an earlier stage does not carry over, and `HEALTHCHECK NONE`
+  does not count);
+- it is **multi-stage exactly when the project has a build step** (a `package.json` with a `build`
+  script, `Cargo.toml`, `go.mod`, a JVM or .NET project, `tsconfig.json`, a Makefile `build`
+  target, or a build command named in the architecture), and a single stage otherwise;
+- no platform-specific files appear (`docker-compose.yml`, `fly.toml`, `render.yaml`, `Procfile`,
+  Kubernetes or Helm directories) and `foundry.lock` was not touched;
+- the project's test command still passes (the session may have had to add a `/health` endpoint).
+
+A Dockerfile that fails any of these goes back to the session with the list of problems, up to
+three attempts in all. If it never passes, its files are put in `git stash`, the run stays in
+progress, and `foundry resume` tries again. A Dockerfile that passes is committed to `main` as
+`foundry: dockerfile generated — <base image>, <port>` together with its `[dockerfile]` entry
+(base images, stages, port, health check, a hash of the file, attempts, the files committed) and
+pushed. The run is then marked complete: `[completed]` is appended after `[dockerfile]` and is the
+last section in the lock. Foundry does not run `docker build`; Docker is not required.
+
 ### Pre-flight
 
 After the PRD, pre-flight reports contradictions, missing topics (authentication, error
@@ -185,6 +210,7 @@ recorded in the lock as `[run.test_runner]`.
 | `progress.py` | Where a run stands, computed from the lock alone (shared by resume and status) |
 | `resume.py` | `ResumeCoordinator`: validates, repairs crash leftovers, rebuilds the state buffer, checks the model, records `foundry: resumed` |
 | `status.py` | `foundry status` output |
+| `dockerfile.py` | `DockerfileStage`: build-step detection, the Dockerfile session, its checks, the commit |
 | `models.py` | Model availability check (Models API) and the replacement-model prompt |
 | `failures.py` | Failure policy: classifier, backoff, one-shot code retry, `$EDITOR` escalation, fix hints |
 | `stages.py` | `Stage` protocol for the steps after planning |
@@ -202,7 +228,7 @@ named sections (`[artifacts.prd]`, `[checkpoints.prd]`, `[checkpoints.prd.revisi
 `[run.test_runner]`, `[plan]`, `[repo]`, `[scaffold]`, `[epics.epic-1]`, `[epics.epic-1.merged]`,
 `[implementation.epic-1.story-1]`, `[failures.epic-1.story-1]`, `[interventions.epic-1.story-1]`,
 `[deferred.epic-1.story-1]`, `[halts.halt-1]`, `[resumes.resume-1]`, `[model_changes.change-1]`,
-`[consistency.pass-1]`, `[cancelled]`, `[cancelled.cancel-2]`, `[completed]`), so a run's
+`[consistency.pass-1]`, `[dockerfile]`, `[cancelled]`, `[cancelled.cancel-2]`, `[completed]`), so a run's
 end is recorded by appending a section rather than by changing `[run].status`. A run is
 "in progress" while `[run]` exists and neither `[cancelled]` nor `[completed]` does.
 
