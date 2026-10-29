@@ -50,11 +50,33 @@ class TestStartup:
         assert proc.stdout.strip() == "[]", proc.stdout
 
 
-class TestStubs:
-    def test_quick_is_still_a_stub(self) -> None:
-        result = runner.invoke(app, ["quick", "an idea"])
-        assert result.exit_code == 1
-        assert "not implemented" in result.output
+class TestQuick:
+    def test_quick_runs_the_quick_pipeline_and_reports_run_id(self, workspace: Path) -> None:
+        result = runner.invoke(app, ["quick", "a link shortener"])
+        assert result.exit_code == 0, result.output
+        assert "Run " in result.output and "finished" in result.output
+
+    def test_quick_records_the_mode_in_the_lock(self, workspace: Path) -> None:
+        import tomllib
+
+        runner.invoke(app, ["quick", "a link shortener"])
+        run = tomllib.loads((workspace / "foundry.lock").read_text(encoding="utf-8"))["run"]
+        assert run["mode"] == "quick" and run["idea"] == "a link shortener"
+
+    def test_pro_records_its_mode_too(self, workspace: Path) -> None:
+        import tomllib
+
+        runner.invoke(app, ["pro", "a link shortener"])
+        assert tomllib.loads((workspace / "foundry.lock").read_text(encoding="utf-8"))["run"]["mode"] == "pro"
+
+    @pytest.mark.parametrize("idea", ["", "   "])
+    def test_an_empty_idea_is_refused_before_anything_is_created(self, workspace: Path, idea: str) -> None:
+        result = runner.invoke(app, ["quick", idea])
+        assert result.exit_code == 1 and "idea is empty" in result.output
+        assert list(workspace.iterdir()) == []
+
+    def test_help_documents_private(self) -> None:
+        assert "--private" in runner.invoke(app, ["quick", "--help"]).output
 
 
 class TestPro:
