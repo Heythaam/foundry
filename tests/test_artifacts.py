@@ -102,8 +102,8 @@ class TestWriteArtifact:
         with pytest.raises(EnvFailure):
             write_artifact(tmp_path, "prd", Artifact("x\n", ArtifactType.PRD))
 
-    def test_the_persisted_phases_are_the_four_planning_artifacts(self) -> None:
-        assert PERSISTED_PHASES == {"brainstorm", "prd", "architecture", "epics"}
+    def test_the_persisted_phases_are_the_planning_artifacts_and_the_quick_spec(self) -> None:
+        assert PERSISTED_PHASES == {"brainstorm", "prd", "architecture", "epics", "spec"}
 
 
 # ------------------------------------------------------------ after approval

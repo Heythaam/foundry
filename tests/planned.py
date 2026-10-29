@@ -478,3 +478,124 @@ class FinalizingRunner(ImplementingRunner):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
         return AgentResult(text="dockerfile written")
+
+
+# ------------------------------------------------------------------------ quick mode (Epic 7)
+
+
+def make_spec(test_command: str, title: str = "Link Shortener") -> str:
+    """A valid one-page spec whose test strategy runs `test_command`."""
+    return (
+        f"# {title}\n\n"
+        "## Feature list\n- Shorten a URL\n- Resolve a short code\n\n"
+        "## Not building\n- Accounts\n\n"
+        "## Data model\n- Link(code, url, created_at)\n\n"
+        f"## Test strategy\n\nUnit tests for every function.\n\n```bash\n{test_command}\n```\n\n"
+        "## Assumptions\n- Python 3.12, standard library only\n"
+    )
+
+
+PLAN = """\
+### Increment 1: Data model
+
+Build the Link model and its tests.
+
+### Increment 2: Shortening logic
+
+Build code generation and lookup, with tests.
+
+### Increment 3: Command line
+
+Build the `shorten` command, with tests.
+"""
+
+
+class QuickRunner(FinalizingRunner):
+    """One scripted agent for a whole quick run: the spec, the increment plan, the increments
+    (as `ImplementingRunner` does) and the Dockerfile."""
+
+    def __init__(self, spec: str | None = None, plans=None, story_steps=None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        # "Q.2" -> one step per session of that increment (the last repeats): files or an exception
+        self.story_steps = dict(story_steps or {})
+        self.spec = spec  # filled in with the test command by `quick_run` when left as None
+        self.plans = [PLAN] if plans is None else list(plans)
+        self.spec_prompts: list[str] = []
+        self.plan_prompts: list[str] = []
+        self.sessions: list[str] = []  # every session's name, in order
+        self.tools_branches: list[str] = []
+
+    async def run(self, request, ctx):
+        self.sessions.append(request.name)
+        if request.name == "spec":
+            self.spec_prompts.append(request.prompt)
+            return AgentResult(text=self.spec or "")
+        if request.name == "increment plan":
+            self.plan_prompts.append(request.prompt)
+            step = self.plans[min(len(self.plan_prompts), len(self.plans)) - 1]
+            if isinstance(step, BaseException):
+                raise step
+            return AgentResult(text=step)
+        story = request.name.removeprefix("story ")
+        if request.name.startswith("story Q.") and story in self.story_steps:
+            steps = self.story_steps[story]
+            self.prompts.append(request.prompt)
+            head = (ctx.workspace_path / ".git" / "HEAD").read_text(encoding="utf-8").strip()
+            self.branches.append(head.removeprefix("ref: refs/heads/"))
+            step = steps[min(self.sessions.count(request.name), len(steps)) - 1]
+            if isinstance(step, BaseException):
+                raise step
+            for relative, text in step.items():
+                target = ctx.workspace_path / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+            return AgentResult(text=f"implemented {story}")
+        return await super().run(request, ctx)
+
+
+async def quick_run(
+    workspace: Path,
+    tmp_path: Path,
+    runner: QuickRunner,
+    *,
+    command: str | None = None,
+    checkpoint=None,
+    through: str = "dockerfile",
+    idea: str = "a link shortener",
+    **stage_kwargs,
+):
+    """`foundry quick` without the CLI: spec, checkpoint, repo, increments, Dockerfile.
+
+    `through` stops early: "repo" (spec approved, repository scaffolded), "implementation"
+    (plus the increments) or "dockerfile" (the whole run).
+    """
+    from foundry.dockerfile import DockerfileStage
+    from foundry.gitops import GitOps
+    from foundry.orchestrator import Orchestrator
+    from foundry.quick import QuickImplementationStage, build_quick_pipeline
+    from foundry.repo import RepoStage
+    from tests.helpers import ScriptedCheckpoint
+
+    test_command = command or count_command(tmp_path)
+    if runner.spec is None:
+        runner.spec = make_spec(test_command)
+    gitops = quiet(GitOps.from_env(workspace, require_token=True))
+    stages = [RepoStage(gitops, ScriptedNamePrompt())]
+    if through in ("implementation", "dockerfile"):
+        stages.append(
+            QuickImplementationStage(
+                gitops, runner, on_test_output=lambda t: None, say=lambda t: None, **stage_kwargs
+            )
+        )
+    if through == "dockerfile":
+        stages.append(
+            DockerfileStage(gitops, runner, on_test_output=lambda t: None, say=lambda t: None)
+        )
+    ctx = RunContext(idea=idea, workspace_path=workspace, mode="quick")
+    orchestrator = Orchestrator(
+        build_quick_pipeline(runner),
+        checkpoint=checkpoint or ScriptedCheckpoint(),
+        stages=stages,
+        gitops=gitops,
+    )
+    return ctx, await orchestrator.run(ctx)

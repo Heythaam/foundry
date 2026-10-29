@@ -63,6 +63,12 @@ def require_resumable(progress: RunProgress | None) -> RunProgress:
             f"Run {progress.run_id} already completed; there is nothing to resume.",
             fix="Start a new run with `foundry pro` in an empty directory.",
         )
+    if progress.mode == "quick":
+        raise EnvFailure(
+            f"Run {progress.run_id} is a quick run, and `foundry resume` continues only Pro mode "
+            "runs: it works from an approved epic plan, which a quick run does not have.",
+            fix="Run `foundry quick` again in a new directory. `foundry status` shows how far this one got.",
+        )
     if progress.phase == PHASE_PLANNING:
         raise EnvFailure(
             f"Run {progress.run_id} stopped during planning"

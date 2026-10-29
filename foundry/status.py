@@ -108,3 +108,60 @@ def render_status(progress: RunProgress, now: datetime | None = None) -> str:
         if halt.get("fix"):
             lines.append(f"  To fix:      {halt['fix']}")
     return "\n".join(lines)
+
+
+def _quick_phase_line(data: dict, progress: RunProgress) -> str:
+    from foundry.quick import quick_progress
+
+    if progress.status == "completed":
+        return "finished"
+    if "spec" not in (data.get("artifacts") or {}):
+        return "writing the spec (it opens in your editor for review)"
+    if "scaffold" not in data:
+        return "creating the repository"
+    quick = quick_progress(data)
+    if not quick.planning_done:
+        return "planning the increments"
+    if quick.remaining:
+        return f"implementation, next increment {quick.remaining[0]}"
+    if progress.dockerfile:
+        return "finalization: recording completion"
+    return "finalization: generating the Dockerfile"
+
+
+def render_quick_status(data: dict, progress: RunProgress, now: datetime | None = None) -> str:
+    """The same summary for a `foundry quick` run, whose steps are increments, not epics."""
+    from foundry.quick import quick_progress
+
+    now = now or datetime.now(timezone.utc)
+    quick = quick_progress(data)
+    status = _status_line(progress)
+    if progress.status == "cancelled":
+        status = "cancelled (a quick run cannot be resumed)"
+    lines = [
+        f"Run {progress.run_id}",
+        f"  Idea:        {progress.idea}",
+        "  Mode:        quick",
+        f"  Status:      {status}",
+        f"  Phase:       {_quick_phase_line(data, progress)}",
+    ]
+    if quick.planning_done:
+        extra = f" ({len(quick.deferred)} deferred)" if quick.deferred else ""
+        lines.append(
+            f"  Increments:  {len(quick.implemented)} of {len(quick.planned)} committed{extra}"
+        )
+    if progress.dockerfile:
+        image, port = progress.dockerfile.get("base_image"), progress.dockerfile.get("port")
+        lines.append(f"  Dockerfile:  generated ({image}, port {port})")
+    lines.append(f"  Model:       {progress.model}")
+    lines.append(f"  Started:     {progress.started_at}")
+    lines.append(f"  Elapsed:     {format_duration(progress.elapsed_seconds)}")
+    if progress.last_action_at:
+        age = (now - parse_timestamp(progress.last_action_at)).total_seconds()
+        lines.append(f"  Last action: {progress.last_action_at} ({format_duration(age)} ago)")
+    if progress.last_halt:
+        halt = progress.last_halt
+        lines.append(f"  Stopped:     {halt.get('message', '')}")
+        if halt.get("fix"):
+            lines.append(f"  To fix:      {halt['fix']}")
+    return "\n".join(lines)

@@ -63,6 +63,7 @@ class RunProgress:
     started_epics: tuple[int, ...]
     last_halt: dict[str, Any] | None = None  # the newest halt, if the run has not progressed since
     pending_model_change: PendingModelChange | None = None
+    mode: str = "pro"  # "pro" or "quick"
     dockerfile: dict[str, Any] | None = None  # the [dockerfile] section, once generated
     resumes: int = 0
     cancellations: int = 0
@@ -218,6 +219,7 @@ def progress_from_lock(data: dict[str, Any], now: datetime | None = None) -> Run
         started_epics=tuple(started),
         last_halt=last_halt,
         pending_model_change=pending_model_change(data),
+        mode=str(run.get("mode", "pro")),
         dockerfile=dict(data["dockerfile"]) if isinstance(data.get("dockerfile"), dict) else None,
         resumes=len(_numbered(data.get("resumes"), "resume-")),
         cancellations=cancellation_count(data),

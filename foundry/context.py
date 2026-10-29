@@ -172,6 +172,7 @@ class RunContext:
     model_id: str = field(default_factory=default_model_id)
     start_time: datetime = field(default_factory=utc_now)
     review_epics: bool = False  # --review-epics: checkpoint before each epic (FR-6)
+    mode: str = "pro"  # "pro" (full planning pipeline) or "quick" (spec first, FR-2)
     # Approved artifact per phase name, filled by the orchestrator only. A phase's `input` is
     # just the previous phase's output; this is how it reads an earlier one (e.g. the PRD).
     upstream: dict[str, Artifact] = field(default_factory=dict, repr=False)

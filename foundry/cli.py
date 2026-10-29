@@ -57,9 +57,17 @@ def _default_phases() -> list[Phase]:
     return build_pipeline()
 
 
-def _build_stages(workspace: Path, private: bool) -> tuple[list[Stage], GitOps | None]:
+def _quick_phases() -> list[Phase]:
+    from foundry.quick import build_quick_pipeline
+
+    return build_quick_pipeline()
+
+
+def _build_stages(
+    workspace: Path, private: bool, quick: bool = False
+) -> tuple[list[Stage], GitOps | None]:
     """The post-planning stages and the one GitOps they share. Fails before any planning work
-    is spent if GITHUB_TOKEN is missing (NFR-6)."""
+    is spent if GITHUB_TOKEN is missing (NFR-6). A quick run builds from its spec on `main`."""
     from foundry.dockerfile import DockerfileStage
     from foundry.failures import BackoffPolicy, RetryingFailureHandler
     from foundry.gitops import GitOps
@@ -68,7 +76,12 @@ def _build_stages(workspace: Path, private: bool) -> tuple[list[Stage], GitOps |
 
     gitops = GitOps.from_env(workspace, require_token=True)
     failures, backoff = RetryingFailureHandler(), BackoffPolicy.from_env()
-    implementation = ImplementationStage(gitops, failures=failures, backoff=backoff)
+    stage_class = ImplementationStage
+    if quick:
+        from foundry.quick import QuickImplementationStage
+
+        stage_class = QuickImplementationStage
+    implementation = stage_class(gitops, failures=failures, backoff=backoff)
     finalization = DockerfileStage(gitops, failures=failures, backoff=backoff)
     return [RepoStage(gitops, private=private), implementation, finalization], gitops
 
@@ -99,9 +112,27 @@ def pro(
 
 
 @app.command()
-def quick(idea: str = typer.Argument(..., help="The idea to build in Quick mode.")) -> None:
-    """Start a Quick mode run that skips planning (not implemented yet)."""
-    raise _fail("`foundry quick` is not implemented yet.")
+def quick(
+    idea: str = typer.Argument(..., help="The idea to build in Quick mode."),
+    private: bool = typer.Option(
+        False, "--private", help="Create the GitHub repository as private (default: public)."
+    ),
+) -> None:
+    """Skip planning: write a one-page spec, review it, then build it in tested increments."""
+    from foundry.orchestrator import Orchestrator, RunStatus
+
+    if not idea.strip():
+        raise _fail("The idea is empty. Describe what to build, e.g. foundry quick \"a URL shortener\".")
+    ctx = RunContext(idea=idea, mode="quick")
+    try:
+        stages, gitops = _build_stages(ctx.workspace_path, private, quick=True)
+        orchestrator = Orchestrator(_quick_phases(), stages=stages, gitops=gitops)
+        result = asyncio.run(orchestrator.run(ctx))
+    except FoundryError as err:
+        raise _fail_with(err) from err
+    if result.status is RunStatus.CANCELLED:
+        raise _fail(f"Run {ctx.run_id} cancelled. A quick run cannot be resumed.")
+    typer.echo(f"Run {ctx.run_id} finished.")
 
 
 @app.command()
@@ -134,15 +165,16 @@ def status() -> None:
     """Show where the current run stands."""
     from foundry.lock import LockFile
     from foundry.progress import progress_from_lock
-    from foundry.status import NO_RUN_MESSAGE, render_status
+    from foundry.status import NO_RUN_MESSAGE, render_quick_status, render_status
 
     try:
-        progress = progress_from_lock(LockFile.for_workspace(Path.cwd()).read())
+        data = LockFile.for_workspace(Path.cwd()).read()
+        progress = progress_from_lock(data)
     except FoundryError as err:
         raise _fail(err.message) from err
     if progress is None:
         raise _fail(NO_RUN_MESSAGE)
-    typer.echo(render_status(progress))
+    typer.echo(render_quick_status(data, progress) if progress.mode == "quick" else render_status(progress))
 
 
 @app.command()
