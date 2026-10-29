@@ -135,7 +135,7 @@ class TestGate:
         received: list[GateResult] = []
 
         class Handler:
-            async def on_test_failure(self, story, result, ctx) -> Recovery:
+            async def on_test_failure(self, story, result, ctx, attempt) -> Recovery:
                 received.append(result)
                 return Recovery(GateResult(True, 0, "fixed\n2 passed", 1.0, 2), retries=1)
 
@@ -162,7 +162,7 @@ class TestGate:
         self, workspace: Path, tmp_path: Path
     ) -> None:
         class Lying:
-            async def on_test_failure(self, story, result, ctx) -> Recovery:
+            async def on_test_failure(self, story, result, ctx, attempt) -> Recovery:
                 return Recovery(result)  # still red
 
         command = python_command(tmp_path, "import sys; sys.exit(1)")

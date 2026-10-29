@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from foundry.checkpoint import CheckpointResult
 from foundry.context import (
@@ -26,6 +26,9 @@ from foundry.epics import Story
 from foundry.gitops import CIResult, GitOps, PullRequestInfo, RepoInfo, commit_message
 from foundry.lock import LOCK_FILENAME, LockFile
 from foundry.state import StateBuffer, state_db_path
+
+if TYPE_CHECKING:  # failures imports stages, which imports this module
+    from foundry.failures import FailureRecord, InterventionRecord
 
 
 class ProvenanceRecorder:
@@ -170,29 +173,142 @@ class ProvenanceRecorder:
         tests_passed: int | None,
         duration_seconds: float,
         retries: int,
+        kind: str = "implemented",
+        failure: FailureRecord | None = None,
+        intervention: InterventionRecord | None = None,
     ) -> None:
         """Append [implementation.epic-E.story-S] and commit it with the story's changes.
 
         `artifact_hash` is the SHA-256 of the staged diff, so the lock pins exactly what was
         committed without holding any of the agent's output (NFR-7). One call, one commit
-        (NFR-8): the message is `foundry: story E.S implemented — title` (FR-19, FR-29).
+        (NFR-8). The message is `foundry: story E.S implemented — title` (FR-19, FR-29), or
+        `... auto-fixed — title` after a successful automatic retry (FR-21), or
+        `foundry: story E.S — human intervention` when the human edited the code (FR-23).
+        A failure and an intervention, if any, are recorded in the same commit.
         """
+        if kind == "auto-fixed":
+            message = commit_message(f"story {story.id} auto-fixed", story.title)
+        elif kind == "human":
+            message = commit_message(f"story {story.id}", "human intervention")
+        else:
+            message = commit_message(f"story {story.id} implemented", story.title)
+        epic_story = f"epic-{story.epic}.story-{story.number}"
+        sections: list[tuple[str, dict[str, Any]]] = []
+        if failure is not None:
+            sections.append((f"failures.{epic_story}", self._outcome_fields(story, failure)))
+        if intervention is not None:
+            sections.append((f"interventions.{epic_story}", self._outcome_fields(story, intervention)))
+        sections.append(
+            (
+                f"implementation.{epic_story}",
+                {
+                    "story_id": story.id,
+                    "title": story.title,
+                    "artifact_hash": artifact_hash,
+                    "tests_passed": tests_passed if tests_passed is not None else 0,
+                    "tests_counted": tests_passed is not None,
+                    "duration_seconds": round(duration_seconds, 3),
+                    "retries": retries,
+                    "completed_at": iso_utc(utc_now()),
+                },
+            )
+        )
+
+        def write() -> None:  # the implementation entry goes last: its presence means "done"
+            for section, fields in sections:
+                self.lock.append_section(section, fields)
+
         await self._record(
             action=f"story {story.id} implemented",
             detail=story.title,
-            section=f"implementation.epic-{story.epic}.story-{story.number}",
-            fields={
-                "story_id": story.id,
-                "title": story.title,
-                "artifact_hash": artifact_hash,
-                "tests_passed": tests_passed if tests_passed is not None else 0,
-                "tests_counted": tests_passed is not None,
-                "duration_seconds": round(duration_seconds, 3),
-                "retries": retries,
-                "completed_at": iso_utc(utc_now()),
-            },
-            paths=None,  # the story's changes and the lock entry land in one commit
+            section=sections[-1][0],
+            write=write,
+            message=message,
+            paths=None,  # the story's changes and the lock entries land in one commit
         )
+
+    async def record_story_outcome(
+        self,
+        story: Story,
+        outcome: str,
+        *,
+        failure: FailureRecord | None = None,
+        intervention: InterventionRecord | None = None,
+    ) -> None:
+        """Record a story that was not committed (`deferred`, `cancelled`): lock entries only.
+
+        The story's changes, if any, stay out of this commit; it holds foundry.lock alone.
+        """
+        epic_story = f"epic-{story.epic}.story-{story.number}"
+        sections: list[tuple[str, dict[str, Any]]] = []
+        if failure is not None:
+            sections.append((f"failures.{epic_story}", self._outcome_fields(story, failure)))
+        if intervention is not None:
+            sections.append((f"interventions.{epic_story}", self._outcome_fields(story, intervention)))
+        if outcome == "deferred":
+            sections.append(
+                (
+                    f"deferred.{epic_story}",
+                    {"story_id": story.id, "title": story.title, "deferred_at": iso_utc(utc_now())},
+                )
+            )
+        if not sections:
+            return
+
+        def write() -> None:
+            for section, fields in sections:
+                self.lock.append_section(section, fields)
+
+        await self._record(
+            action=f"story {story.id} {outcome}",
+            detail=story.title,
+            section=sections[-1][0],
+            write=write,
+        )
+
+    async def record_halt(
+        self,
+        stage: str,
+        category: str,
+        message: str,
+        fix: str,
+        location: dict[str, Any],
+    ) -> str:
+        """Append [halts.halt-N]: an environment failure stopped the run (FR-24).
+
+        The run stays in progress, so `foundry resume` can continue once the cause is fixed.
+        Every halt gets its own section, because a resumed run can halt again. Returns the
+        section name.
+        """
+        existing = self.lock.read().get("halts", {})
+        number = (len(existing) if isinstance(existing, dict) else 0) + 1
+        section = f"halts.halt-{number}"
+        fields: dict[str, Any] = {
+            "stage": stage,
+            "category": category,
+            "message": message,
+            "fix": fix,
+            "halted_at": iso_utc(utc_now()),
+            **{key: value for key, value in location.items() if value is not None},
+        }
+        try:
+            fields["branch"] = await self.git.current_branch()
+            fields["head_sha"] = await self.git.head_sha()
+        except Exception:  # the halt may be about git itself; record what we can
+            pass
+        await self._record(
+            action=f"halted ({stage})", detail=message.splitlines()[0][:100], section=section, fields=fields
+        )
+        return section
+
+    @staticmethod
+    def _outcome_fields(story: Story, record: FailureRecord | InterventionRecord) -> dict[str, Any]:
+        return {
+            "story_id": story.id,
+            "title": story.title,
+            **record.as_fields(),
+            "recorded_at": iso_utc(utc_now()),
+        }
 
     async def record_epic_merged(
         self, number: int, pr: PullRequestInfo, ci: CIResult, merge_sha: str

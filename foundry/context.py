@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
+import socket
+import subprocess
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,10 +47,14 @@ class FoundryError(Exception):
 
     category: FailureCategory = FailureCategory.ENVIRONMENT
 
-    def __init__(self, message: str, context: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, message: str, context: dict[str, Any] | None = None, *, fix: str | None = None
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.context = context or {}
+        self.fix = fix  # what the human should do about it, when we know
+        self.source: str | None = None  # which external call failed, once classified
 
 
 class CodeFailure(FoundryError):
@@ -62,18 +69,44 @@ class EnvFailure(FoundryError):
     category = FailureCategory.ENVIRONMENT
 
 
-def classify_exception(exc: BaseException) -> FoundryError:
-    """Turn any exception raised by an external call into a categorised FoundryError.
+_DISK_FULL_ERRNOS = {errno.ENOSPC, errno.EDQUOT}
+_PERMISSION_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
-    Unclassifiable errors default to environment, the safest category (hard stop).
+
+def classify_exception(exc: BaseException, source: str | None = None) -> FoundryError:
+    """Turn any exception raised by an external call into a categorised FoundryError (AD-3).
+
+    The category is attached to the error itself, and `source` names the call that failed.
+      * infrastructure: timeouts, connection and DNS failures, a subprocess that timed out;
+      * environment: a full disk, a permission problem, and anything not recognised, because
+        a hard stop is the safest default.
+    Code failures are never inferred from a bare exception: they are raised as CodeFailure by
+    the component that can tell a wrong answer from a broken environment.
     """
     if isinstance(exc, FoundryError):
-        return exc
-    if isinstance(exc, (TimeoutError, ConnectionError)):
-        error: FoundryError = InfraFailure(f"{type(exc).__name__}: {exc}")
+        error = exc
+    elif isinstance(
+        exc, (TimeoutError, ConnectionError, socket.gaierror, subprocess.TimeoutExpired)
+    ):
+        error = InfraFailure(f"{type(exc).__name__}: {exc}")
+        error.__cause__ = exc
+    elif isinstance(exc, OSError) and exc.errno in _DISK_FULL_ERRNOS:
+        error = EnvFailure(
+            f"the disk is full ({exc})", fix="Free up disk space, then resume the run."
+        )
+        error.__cause__ = exc
+    elif isinstance(exc, OSError) and exc.errno in _PERMISSION_ERRNOS:
+        target = f" {exc.filename!r}" if exc.filename else ""
+        error = EnvFailure(
+            f"permission denied{target}: {exc.strerror or exc}",
+            fix="Check that the current user can write to the project directory.",
+        )
+        error.__cause__ = exc
     else:
         error = EnvFailure(f"{type(exc).__name__}: {exc}")
-    error.__cause__ = exc
+        error.__cause__ = exc
+    if source and error.source is None:
+        error.source = source
     return error
 
 
@@ -108,6 +141,7 @@ class ArtifactType(str, Enum):
     EPICS = "epics"
     SPEC = "spec"
     EPIC_REVIEW = "epic_review"
+    ESCALATION = "escalation"
     STUB = "stub"
 
 

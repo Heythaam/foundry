@@ -5,28 +5,53 @@ prompt, run a fresh `claude -p` subprocess (AD-7), run the recorded test command
 commit on green (FR-19); when the epic is done open a PR, wait for CI and merge (FR-20).
 Every git/GitHub mutation is a GitOps call (AD-8) and every action is recorded in the lock
 and in git together (AD-2).
+
+Failures go through a FailureHandler (Epic 4): the default here stops at the first one, the
+CLI wires in the retry / backoff / escalate policy from `foundry.failures`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, TypeVar
 
 from foundry.agent import AgentRequest, AgentResult, AgentRunner, ClaudeCodeRunner, print_to_terminal
 from foundry.artifacts import read_artifact
 from foundry.cancel import is_cancel_requested
 from foundry.checkpoint import CheckpointHandler, EditorCheckpoint
-from foundry.context import CodeFailure, EnvFailure, RunContext
+from foundry.context import CodeFailure, EnvFailure, FoundryError, RunContext
 from foundry.epics import Epic, Story, validate_plan
+from foundry.failures import (
+    BackoffPolicy,
+    EscalationCancelled,
+    FailureHandler,
+    Recovery,
+    RetriesExhausted,
+    StoryAttempt,
+    with_backoff,
+)
 from foundry.gitops import MAIN_BRANCH, CIResult, GitOps, PullRequestInfo
 from foundry.provenance import ProvenanceRecorder
 from foundry.review import EpicReviewer, ProjectState
 from foundry.scaffold import slugify
 from foundry.stages import CancelRequested
 from foundry.testgate import DEFAULT_TIMEOUT_SECONDS, GateResult, run_test_command
+
+__all__ = [
+    "CIFailure",
+    "FailureHandler",
+    "HaltOnFailure",
+    "ImplementationStage",
+    "Recovery",
+    "build_story_prompt",
+    "epic_branch_name",
+]
+
+T = TypeVar("T")
 
 _BRANCH_SLUG_LENGTH = 40
 
@@ -78,32 +103,11 @@ class CIFailure(CodeFailure):
     """CI on an epic's pull request finished red."""
 
 
-@dataclass(frozen=True)
-class Recovery:
-    """A failure handler's answer: a passing gate result, and how many retries it took."""
-
-    result: GateResult
-    retries: int = 0
-
-
-@runtime_checkable
-class FailureHandler(Protocol):
-    """Where Epic 4 plugs in (auto-retry, backoff, escalation). Raise to stop the run."""
-
-    async def on_test_failure(
-        self, story: Story, result: GateResult, ctx: RunContext
-    ) -> Recovery: ...
-
-    async def on_ci_failure(
-        self, epic: Epic, ci: CIResult, pr: PullRequestInfo, ctx: RunContext
-    ) -> CIResult: ...
-
-
 class HaltOnFailure:
-    """The Epic 3 default: a red gate or red CI stops the run, carrying the evidence."""
+    """The default handler: any failure stops the run, carrying the evidence."""
 
     async def on_test_failure(
-        self, story: Story, result: GateResult, ctx: RunContext
+        self, story: Story, result: GateResult, ctx: RunContext, attempt: StoryAttempt | None = None
     ) -> Recovery:
         raise CodeFailure(
             f"story {story.id} ({story.title}) failed its tests (exit {result.exit_code}). "
@@ -112,7 +116,12 @@ class HaltOnFailure:
         )
 
     async def on_ci_failure(
-        self, epic: Epic, ci: CIResult, pr: PullRequestInfo, ctx: RunContext
+        self,
+        epic: Epic,
+        ci: CIResult,
+        pr: PullRequestInfo,
+        ctx: RunContext,
+        recheck: Callable[[], Awaitable[CIResult]] | None = None,
     ) -> CIResult:
         raise CIFailure(
             f"CI failed on epic {epic.number}'s pull request {pr.url}: "
@@ -121,9 +130,44 @@ class HaltOnFailure:
             {"epic": epic.number, "pull_request": pr.number, "failures": list(ci.failures)},
         )
 
+    async def on_infra_exhausted(
+        self,
+        scope: str,
+        error: RetriesExhausted,
+        ctx: RunContext,
+        attempt: StoryAttempt | None = None,
+    ) -> Recovery | None:
+        raise error
+
 
 def _say(text: str) -> None:
     print_to_terminal(text + "\n")
+
+
+@dataclass
+class _Attempt:
+    """What a failure handler may do to the story in front of it (see StoryAttempt)."""
+
+    stage: ImplementationStage
+    story: Story
+    command: str
+    ctx: RunContext
+    architecture: str | None = None
+
+    async def retry(self, notes: str | None = None, story: Story | None = None) -> GateResult:
+        story = story or self.story
+        architecture = self.architecture
+        if architecture is None:
+            architecture = await asyncio.to_thread(read_artifact, self.ctx.workspace_path, "architecture")
+        await self.stage.run_session(story, architecture, self.command, self.ctx, notes=notes)
+        self.stage.say("")
+        return await self.gate()
+
+    async def gate(self) -> GateResult:
+        return await self.stage.run_test_gate(self.command, self.ctx)
+
+    async def diff(self) -> str:
+        return await self.stage.git.working_diff()
 
 
 class ImplementationStage:
@@ -138,14 +182,16 @@ class ImplementationStage:
         test_timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
         on_test_output: Callable[[str], None] = print_to_terminal,
         say: Callable[[str], None] = _say,
+        backoff: BackoffPolicy | None = None,
     ) -> None:
         self.git = gitops
         self.runner = runner or ClaudeCodeRunner(allowed_tools=IMPLEMENTATION_TOOLS)
-        self.failures = failures or HaltOnFailure()
+        self.failures: FailureHandler = failures or HaltOnFailure()
         self.checkpoint = checkpoint
         self.test_timeout = test_timeout
         self.on_test_output = on_test_output
         self.say = say
+        self.backoff = backoff or BackoffPolicy.none()
 
     # ------------------------------------------------------------------- the loop
 
@@ -169,25 +215,62 @@ class ImplementationStage:
             if review.reviewed:
                 # The review's checkpoint commit is on main; publish it so main stays in step
                 # with the remote and the post-merge fast-forward stays a fast-forward.
-                await self.git.push(MAIN_BRANCH, set_upstream=False)
+                await self._guard(
+                    f"epic {epic.number}", "push main", lambda: self.git.push(MAIN_BRANCH, set_upstream=False), ctx
+                )
             epic = review.epic
             if not epic.stories:
                 self.say(f"Epic {epic.number}: every story was skipped in review; nothing to do.")
                 continue
 
             self.say(f"Epic {epic.number}: {epic.title}")
-            branch = await self.start_epic(epic, ctx, recorder)
-            for story in epic.stories:
-                self._check_cancel(ctx, f"story {story.id}")
-                await self.implement_story(story, architecture, command, ctx, recorder)
-                completed.append(story.id)
-            await self.finish_epic(epic, branch, ctx, recorder)
+            with self._located(epic=epic.number):
+                branch = await self.start_epic(epic, ctx, recorder)
+                deferred: list[Story] = []
+                for story in epic.stories:
+                    self._check_cancel(ctx, f"story {story.id}")
+                    with self._located(story=story.id):
+                        if await self.implement_story(story, architecture, command, ctx, recorder):
+                            completed.append(story.id)
+                        else:
+                            deferred.append(story)
+                # Even if every story was deferred the branch carries the epic's lock entries,
+                # so it still goes through a pull request and lands on main.
+                await self.finish_epic(epic, branch, ctx, recorder, deferred=deferred)
             merged.append(epic.number)
 
     @staticmethod
     def _check_cancel(ctx: RunContext, before: str) -> None:
         if is_cancel_requested(ctx.workspace_path):
             raise CancelRequested(before)
+
+    @staticmethod
+    @contextmanager
+    def _located(**where: Any) -> Iterator[None]:
+        """Tell any error that leaves here which epic / story it happened in."""
+        try:
+            yield
+        except FoundryError as err:
+            for key, value in where.items():
+                err.context.setdefault(key, value)
+            raise
+
+    # ------------------------------------------------------------ external calls
+
+    async def _backoff(self, what: str, call: Callable[[], Awaitable[T]]) -> T:
+        return await with_backoff(what, call, self.backoff, self.say)
+
+    async def _guard(
+        self, scope: str, what: str, call: Callable[[], Awaitable[T]], ctx: RunContext
+    ) -> T:
+        """An epic-level external call: backoff, and when that gives up, ask the human."""
+        while True:
+            try:
+                return await self._backoff(what, call)
+            except RetriesExhausted as exhausted:
+                await self.failures.on_infra_exhausted(scope, exhausted, ctx, None)
+
+    # ---------------------------------------------------------------- one story
 
     async def implement_story(
         self,
@@ -196,8 +279,11 @@ class ImplementationStage:
         command: str,
         ctx: RunContext,
         recorder: ProvenanceRecorder,
-    ) -> None:
-        """Session, gate, commit. The clock covers all three, retries included."""
+    ) -> bool:
+        """Session, gate, commit. The clock covers all three, retries included.
+
+        True when the story was committed, False when the human deferred it.
+        """
         if not await self.git.is_clean():
             dirty = ", ".join((await self.git.dirty_files())[:5])
             raise EnvFailure(
@@ -206,37 +292,77 @@ class ImplementationStage:
             )
         started = time.monotonic()
         self.say(f"  Story {story.id}: {story.title}")
-        await self.run_session(story, architecture, command, ctx)
-        self.say("")
-        recovery = await self.run_gate(story, command, ctx)
+        attempt = _Attempt(self, story, command, ctx, architecture)
+        try:
+            try:
+                await self.run_session(story, architecture, command, ctx)
+                self.say("")
+                recovery = await self.run_gate(story, command, ctx, attempt)
+            except RetriesExhausted as exhausted:
+                outcome = await self.failures.on_infra_exhausted(
+                    f"story {story.id}", exhausted, ctx, attempt
+                )
+                if outcome is None:  # a handler that cannot settle a story must raise
+                    raise
+                recovery = outcome
+        except EscalationCancelled as stop:
+            await recorder.record_story_outcome(
+                story, "cancelled", failure=stop.failure, intervention=stop.intervention
+            )
+            raise
+
+        if recovery.skipped:
+            await recorder.record_story_outcome(
+                story, "deferred", failure=recovery.failure, intervention=recovery.intervention
+            )
+            await self.git.stash(f"foundry: story {story.id} deferred")
+            self.say(f"  Story {story.id} deferred; its changes are in `git stash`")
+            return False
         await self.commit_story(story, recovery, time.monotonic() - started, recorder)
         counted = recovery.result.tests_passed
         self.say(f"  Story {story.id} committed ({counted if counted is not None else '?'} tests passed)")
-
-    # --------------------------------------------------------------- one story
+        return True
 
     async def run_session(
-        self, story: Story, architecture: str, test_command: str, ctx: RunContext
+        self,
+        story: Story,
+        architecture: str,
+        test_command: str,
+        ctx: RunContext,
+        notes: str | None = None,
     ) -> AgentResult:
         """One story, one brand-new `claude -p` subprocess with the repo root as its cwd.
 
         The runner writes `.foundry/current-story.md`, streams the session's output to the
         terminal as it arrives and deletes the file when the session ends, win or lose, so the
         prompt never exists while tests run (AD-7). Nothing carries over between stories.
+        `notes` (the failing test output of an earlier attempt) is appended to the prompt;
+        infrastructure errors are retried with the very same prompt and never shown to the LLM.
         """
         prompt = build_story_prompt(story, architecture, test_command)
-        return await self.runner.run(AgentRequest(name=f"story {story.id}", prompt=prompt), ctx)
+        if notes:
+            prompt += "\n" + notes
+        request = AgentRequest(name=f"story {story.id}", prompt=prompt)
+        return await self._backoff(
+            f"story {story.id} session", lambda: self.runner.run(request, ctx)
+        )
 
-    async def run_gate(self, story: Story, command: str, ctx: RunContext) -> Recovery:
-        """Run the recorded test command; a pass proceeds to commit, a fail goes to Epic 4's
-        failure handler with the captured output (FR-18)."""
-        result = await run_test_command(
+    async def run_test_gate(self, command: str, ctx: RunContext) -> GateResult:
+        return await run_test_command(
             command, ctx.workspace_path, timeout=self.test_timeout, on_output=self.on_test_output
         )
+
+    async def run_gate(
+        self, story: Story, command: str, ctx: RunContext, attempt: StoryAttempt | None = None
+    ) -> Recovery:
+        """Run the recorded test command; a pass proceeds to commit, a fail goes to the failure
+        handler with the captured output (FR-18)."""
+        result = await self.run_test_gate(command, ctx)
         if result.passed:
             return Recovery(result)
-        recovery = await self.failures.on_test_failure(story, result, ctx)
-        if not recovery.result.passed:
+        attempt = attempt or _Attempt(self, story, command, ctx)
+        recovery = await self.failures.on_test_failure(story, result, ctx, attempt)
+        if not recovery.skipped and not recovery.result.passed:
             raise CodeFailure(
                 f"story {story.id} still fails its tests after recovery",
                 {"story": story.id, "output": recovery.result.output},
@@ -269,6 +395,9 @@ class ImplementationStage:
             tests_passed=recovery.result.tests_passed,
             duration_seconds=duration_seconds,
             retries=recovery.retries,
+            kind=recovery.kind,
+            failure=recovery.failure,
+            intervention=recovery.intervention,
         )
 
     # ---------------------------------------------------------------- one epic
@@ -287,40 +416,64 @@ class ImplementationStage:
         await recorder.record_epic_branch(
             epic.number, epic.title, branch, MAIN_BRANCH, epic.story_ids
         )
-        await self.git.push(branch)
+        await self._guard(f"epic {epic.number}", "push epic branch", lambda: self.git.push(branch), ctx)
         return branch
 
     async def finish_epic(
-        self, epic: Epic, branch: str, ctx: RunContext, recorder: ProvenanceRecorder
+        self,
+        epic: Epic,
+        branch: str,
+        ctx: RunContext,
+        recorder: ProvenanceRecorder,
+        deferred: Sequence[Story] = (),
     ) -> PullRequestInfo:
         """PR from the epic branch to main, wait for CI, merge when green (FR-20).
 
-        Red CI goes to the failure handler (Epic 4); until it exists the default stops the run
-        with the failing checks and the PR link, and the PR is left open. After the merge, main
-        is brought up to date and the merge is recorded on main in its own commit.
+        Red CI goes to the failure handler, which by default stops the run with the failing
+        checks and the PR link (the PR stays open) and in the CLI asks the human. After the
+        merge, main is brought up to date and the merge is recorded on main in its own commit.
         """
-        await self.git.push(branch, set_upstream=False)  # every story commit is on the remote
-        pr = await self.git.create_pr(
-            head=branch,
-            base=MAIN_BRANCH,
-            title=f"Epic {epic.number}: {epic.title}",
-            body=_pr_body(epic),
+        scope = f"epic {epic.number}"
+        await self._guard(scope, "push epic branch", lambda: self.git.push(branch, set_upstream=False), ctx)
+        pr = await self._guard(
+            scope,
+            "open pull request",
+            lambda: self.git.create_pr(
+                head=branch,
+                base=MAIN_BRANCH,
+                title=f"Epic {epic.number}: {epic.title}",
+                body=_pr_body(epic, deferred),
+            ),
+            ctx,
         )
         self.say(f"Epic {epic.number}: opened {pr.url}; waiting for CI")
 
-        ci = await self.git.poll_ci(pr.head_sha)
+        ci = await self._guard(scope, "wait for CI", lambda: self.git.poll_ci(pr.head_sha), ctx)
         if not ci.passed:
-            ci = await self.failures.on_ci_failure(epic, ci, pr, ctx)
+            current = [pr]
+
+            async def recheck() -> CIResult:
+                fresh = await self._guard(
+                    scope, "read pull request", lambda: self.git.pull_request(pr.number), ctx
+                )
+                current[0] = fresh
+                return await self._guard(
+                    scope, "wait for CI", lambda: self.git.poll_ci(fresh.head_sha), ctx
+                )
+
+            ci = await self.failures.on_ci_failure(epic, ci, pr, ctx, recheck)
+            pr = current[0]
             if not ci.passed:
                 raise CIFailure(
                     f"CI still fails on {pr.url} after recovery: " + "; ".join(ci.failures),
                     {"epic": epic.number, "pull_request": pr.number},
                 )
 
-        merge = await self.git.merge_pr(pr.number, f"Merge epic {epic.number}: {epic.title} (#{pr.number})")
-        await self.git.sync_branch(MAIN_BRANCH)
+        title = f"Merge epic {epic.number}: {epic.title} (#{pr.number})"
+        merge = await self._guard(scope, "merge pull request", lambda: self.git.merge_pr(pr.number, title), ctx)
+        await self._guard(scope, "update main", lambda: self.git.sync_branch(MAIN_BRANCH), ctx)
         await recorder.record_epic_merged(epic.number, pr, ci, merge.sha)
-        await self.git.push(MAIN_BRANCH, set_upstream=False)
+        await self._guard(scope, "push main", lambda: self.git.push(MAIN_BRANCH, set_upstream=False), ctx)
         self.say(f"Epic {epic.number}: merged")
         return pr
 
@@ -339,10 +492,17 @@ class ImplementationStage:
             )
 
 
-def _pr_body(epic: Epic) -> str:
+def _pr_body(epic: Epic, deferred: Sequence[Story] = ()) -> str:
     stories = "\n".join(f"- Story {story.id}: {story.title}" for story in epic.stories)
-    return (
+    body = (
         f"Implements epic {epic.number}: {epic.title}.\n\n{stories}\n\n"
         "Each story is one commit on this branch, written by its own Claude Code session and "
         "gated on the project's test command. Opened by Foundry; it merges when CI is green."
     )
+    if deferred:
+        listed = "\n".join(f"- Story {story.id}: {story.title}" for story in deferred)
+        body += (
+            "\n\n**Deferred by a human during the run, so not included in this pull request:**\n\n"
+            + listed
+        )
+    return body
