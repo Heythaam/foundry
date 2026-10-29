@@ -60,16 +60,17 @@ def _default_phases() -> list[Phase]:
 def _build_stages(workspace: Path, private: bool) -> tuple[list[Stage], GitOps | None]:
     """The post-planning stages and the one GitOps they share. Fails before any planning work
     is spent if GITHUB_TOKEN is missing (NFR-6)."""
+    from foundry.dockerfile import DockerfileStage
     from foundry.failures import BackoffPolicy, RetryingFailureHandler
     from foundry.gitops import GitOps
     from foundry.implementation import ImplementationStage
     from foundry.repo import RepoStage
 
     gitops = GitOps.from_env(workspace, require_token=True)
-    implementation = ImplementationStage(
-        gitops, failures=RetryingFailureHandler(), backoff=BackoffPolicy.from_env()
-    )
-    return [RepoStage(gitops, private=private), implementation], gitops
+    failures, backoff = RetryingFailureHandler(), BackoffPolicy.from_env()
+    implementation = ImplementationStage(gitops, failures=failures, backoff=backoff)
+    finalization = DockerfileStage(gitops, failures=failures, backoff=backoff)
+    return [RepoStage(gitops, private=private), implementation, finalization], gitops
 
 
 @app.command()
