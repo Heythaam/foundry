@@ -3,12 +3,13 @@
 Foundry takes an idea through a human-checkpointed pipeline and records every step as
 tamper-evident provenance in two places at once: `foundry.lock` and git history.
 
-> **Status:** Epics 1-3 (core infrastructure, the planning pipeline, repo creation and the
-> implementation loop). `foundry pro` plans (brainstorm -> PRD -> pre-flight -> architecture ->
+> **Status:** Epics 1-4 (core infrastructure, the planning pipeline, repo creation and the
+> implementation loop, failure handling). `foundry pro` plans (brainstorm -> PRD -> pre-flight -> architecture ->
 > epics/stories, each with a human checkpoint), creates a GitHub repo, then builds every story in
 > its own Claude Code session and merges one PR per epic. `foundry cancel` works; `quick`,
-> `resume` and `status` are stubs, and a failed story or red CI currently stops the run
-> (retry and escalation arrive in Epic 4).
+> `resume` and `status` are stubs. Failed stories are retried once, flaky API calls are backed
+> off, persistent failures are escalated to you in `$EDITOR`, and environment failures stop the
+> run with what to fix.
 
 ## Install
 
@@ -66,7 +67,7 @@ After the epics are approved Foundry leaves the local workspace (AD-9):
    A story that changes nothing counts as a failure.
 4. **Merge.** When an epic's stories are in, Foundry opens a PR to `main`, waits for CI and merges
    it when green, then records `foundry: epic {N} merged — PR #n` on `main` and pushes it. Red
-   CI stops the run and leaves the PR open.
+   CI is escalated to you (below) and the PR stays open until it is green.
 
 Set `GITHUB_TOKEN` (a token with `repo` and `workflow` scope) before running `foundry pro`; it is
 checked first, before any planning work, and is the only place the token is read from. It is
@@ -78,6 +79,35 @@ The CI workflow runs on pull requests to `main` and runs exactly one command, th
 `[run.test_runner]`, after checking out and setting up the toolchain it detects. CI starts from a
 clean checkout, so that command must install the project's dependencies too (for example
 `pip install -e '.[dev]' && pytest -q`); the architecture prompt asks for this.
+
+### Failure handling (Epic 4)
+
+Every external call (Claude Code, GitHub, git, the test command, `$EDITOR`) fails as one of three
+categories, and each is handled differently:
+
+| Category | Examples | What Foundry does |
+| --- | --- | --- |
+| `code` | tests fail, the agent returns nothing | One automatic retry in a **new** session whose prompt is the original plus the failing test output. If it passes the story is committed as `foundry: story E.S auto-fixed — title`; if not, you are asked. |
+| `infrastructure` | rate limits, 5xx, timeouts, network errors | Exponential backoff with jitter (about 2s, 4s, 8s ... up to 2 minutes), up to 5 retries (`FOUNDRY_MAX_RETRIES`). The error never reaches the LLM and nothing is written while waiting. Then you are asked. |
+| `environment` | missing `GITHUB_TOKEN`, no `claude`, full disk, unknown errors | No retry. The run stops with the error and what to fix, and a `[halts.halt-N]` entry is saved so the run can be resumed once it is fixed. |
+
+When you are asked, a file opens in `$EDITOR` with the story, the error, the failing test output
+and the current diff. Write one word after `action:` at the bottom, save and close:
+
+- `retry`: a brand-new session on the story as written in the file (edit the story first to
+  change what it is asked to build);
+- `continue`: you fixed the code yourself in the working tree: the tests run and, if green, it is
+  committed as `foundry: story E.S — human intervention`;
+- `skip`: the story is deferred, its changes are kept in `git stash`, and the epic carries on
+  (the pull request lists what was deferred);
+- `cancel`: the run ends as cancelled (an empty `action:` also cancels). The working tree is left
+  as it is.
+
+Red CI and exhausted retries on epic-level calls (push, open PR, merge) offer `retry` and
+`cancel`; for CI, `retry` re-reads the PR (so push your fix first) and checks CI again.
+Failures and your choices are recorded as `[failures.epic-E.story-S]` (category, retries, outcome,
+a hash of the output) and `[interventions.epic-E.story-S]` (actions, whether you edited the story
+or code); skipped stories get `[deferred.epic-E.story-S]`.
 
 ### Pre-flight
 
@@ -95,6 +125,7 @@ recorded in the lock as `[run.test_runner]`.
 | --- | --- |
 | `GITHUB_TOKEN` | Required for `foundry pro`. The only source of GitHub credentials. |
 | `GITHUB_API_URL` | Optional API base URL. Default `https://api.github.com`. |
+| `FOUNDRY_MAX_RETRIES` | Optional. How many times an infrastructure failure is retried before you are asked. Default `5`; `0` turns backoff off. |
 | `FOUNDRY_MODEL` | Pinned model ID recorded in `[run].model`. Default `claude-sonnet-4-5`. An ID whose last `-` segment has no digit (e.g. `claude-sonnet`) is rejected as an alias. |
 | `EDITOR` | Command used for checkpoints. Falls back to `vi` (Unix) or `notepad` (Windows). It must block until the file is closed (`code --wait`, not `code`). |
 
@@ -117,6 +148,7 @@ recorded in the lock as `[run.test_runner]`.
 | `repo.py` | `RepoStage`: confirm name, create repo, scaffold commit, push |
 | `implementation.py` | `ImplementationStage`: epic branches, story sessions, test gate, commits, PRs, merge |
 | `testgate.py` | Runs the recorded test command, captures its output |
+| `failures.py` | Failure policy: classifier, backoff, one-shot code retry, `$EDITOR` escalation, fix hints |
 | `stages.py` | `Stage` protocol for the steps after planning |
 | `lock.py` | `foundry.lock`: append-only TOML, atomic temp-file + rename writes |
 | `provenance.py` | `ProvenanceRecorder`: every action writes a lock section **and** a git commit |
@@ -130,7 +162,8 @@ recorded in the lock as `[run.test_runner]`.
 `[run]` is written once and never edited. Everything after it is appended as new, uniquely
 named sections (`[artifacts.prd]`, `[checkpoints.prd]`, `[checkpoints.prd.revision-1]`,
 `[run.test_runner]`, `[plan]`, `[repo]`, `[scaffold]`, `[epics.epic-1]`, `[epics.epic-1.merged]`,
-`[implementation.epic-1.story-1]`, `[cancelled]`, `[completed]`), so a run's
+`[implementation.epic-1.story-1]`, `[failures.epic-1.story-1]`, `[interventions.epic-1.story-1]`,
+`[deferred.epic-1.story-1]`, `[halts.halt-1]`, `[cancelled]`, `[completed]`), so a run's
 end is recorded by appending a section rather than by changing `[run].status`. A run is
 "in progress" while `[run]` exists and neither `[cancelled]` nor `[completed]` does.
 

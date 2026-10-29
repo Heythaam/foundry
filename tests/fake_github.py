@@ -168,6 +168,12 @@ class FakeGitHub:
 
         if method == "GET" and rest == "":
             return 200, self._repo_json(repo)
+        if method == "GET" and rest == "/pulls":  # open PRs (the query string is ignored)
+            return 200, [
+                self._pull_json(n)
+                for n, pull in self.pulls.items()
+                if pull["repo"] == repo and not pull["merged"]
+            ]
         if method == "POST" and rest == "/pulls":
             try:
                 sha = _git(bare, "rev-parse", f"refs/heads/{body['head']}")
@@ -176,7 +182,8 @@ class FakeGitHub:
                              "errors": [{"field": "head", "code": "invalid"}]}
             number = len(self.pulls) + 1
             self.pulls[number] = {"repo": repo, "head": body["head"], "base": body["base"],
-                                  "title": body["title"], "sha": sha, "merged": False}
+                                  "title": body["title"], "sha": sha, "merged": False,
+                                  "body": body.get("body") or ""}
             return 201, self._pull_json(number)
         pull = re.fullmatch(r"/pulls/(\d+)(/merge)?", rest)
         if pull and int(pull.group(1)) in self.pulls:

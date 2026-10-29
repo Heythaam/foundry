@@ -279,8 +279,15 @@ def planning(runner: FakeRunner) -> list:
     ]
 
 
-async def whole_run(workspace: Path, tmp_path: Path, runner: ImplementingRunner, **kwargs):
-    architecture = f"# Architecture\n\n## Test Runner\n\n```bash\n{count_command(tmp_path)}\n```\n"
+async def whole_run(
+    workspace: Path,
+    tmp_path: Path,
+    runner: ImplementingRunner,
+    command: str | None = None,
+    **kwargs,
+):
+    test_command = command or count_command(tmp_path)
+    architecture = f"# Architecture\n\n## Test Runner\n\n```bash\n{test_command}\n```\n"
     planner = FakeRunner("# Brainstorm\n\nIdeas.\n", PRD, CLEAN, architecture, EPICS)
     gitops = quiet(GitOps.from_env(workspace, require_token=True))
     stages = [

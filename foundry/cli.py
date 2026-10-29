@@ -33,6 +33,24 @@ def _fail(message: str) -> typer.Exit:
     return typer.Exit(code=1)
 
 
+def _fail_with(err: FoundryError) -> typer.Exit:
+    """Report an error. An environment failure says what to fix; one that stopped a run and
+    was saved to the lock also says how to continue (FR-24)."""
+    from foundry.context import FailureCategory
+    from foundry.failures import GENERIC_FIX, describe_halt, fix_hint
+
+    saved = err.context.get("halted")
+    if saved is True:
+        return _fail(describe_halt(err))
+    if err.category is FailureCategory.ENVIRONMENT:
+        hint = fix_hint(err)
+        message = err.message if hint == GENERIC_FIX else f"{err.message}\nTo fix: {hint}"
+        if saved is False:
+            message += "\n(The failure could not be saved to foundry.lock.)"
+        return _fail(message)
+    return _fail(err.message)
+
+
 def _default_phases() -> list[Phase]:
     from foundry.pipeline import build_pipeline
 
@@ -42,12 +60,16 @@ def _default_phases() -> list[Phase]:
 def _build_stages(workspace: Path, private: bool) -> tuple[list[Stage], GitOps | None]:
     """The post-planning stages and the one GitOps they share. Fails before any planning work
     is spent if GITHUB_TOKEN is missing (NFR-6)."""
+    from foundry.failures import BackoffPolicy, RetryingFailureHandler
     from foundry.gitops import GitOps
     from foundry.implementation import ImplementationStage
     from foundry.repo import RepoStage
 
     gitops = GitOps.from_env(workspace, require_token=True)
-    return [RepoStage(gitops, private=private), ImplementationStage(gitops)], gitops
+    implementation = ImplementationStage(
+        gitops, failures=RetryingFailureHandler(), backoff=BackoffPolicy.from_env()
+    )
+    return [RepoStage(gitops, private=private), implementation], gitops
 
 
 @app.command()
@@ -69,7 +91,7 @@ def pro(
         orchestrator = Orchestrator(_default_phases(), stages=stages, gitops=gitops)
         result = asyncio.run(orchestrator.run(ctx))
     except FoundryError as err:
-        raise _fail(err.message) from err
+        raise _fail_with(err) from err
     if result.status is RunStatus.CANCELLED:
         raise _fail(f"Run {ctx.run_id} cancelled.")
     typer.echo(f"Run {ctx.run_id} finished.")

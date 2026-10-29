@@ -140,10 +140,10 @@ class TestCiGate:
         seen: list[tuple[int, int, tuple[str, ...]]] = []
 
         class Recovers:
-            async def on_test_failure(self, story, result, ctx):
+            async def on_test_failure(self, story, result, ctx, attempt):
                 raise AssertionError("not used")
 
-            async def on_ci_failure(self, epic, ci: CIResult, pr: PullRequestInfo, ctx) -> CIResult:
+            async def on_ci_failure(self, epic, ci: CIResult, pr: PullRequestInfo, ctx, recheck) -> CIResult:
                 seen.append((epic.number, pr.number, ci.failures))
                 return CIResult(True, ("test: success",))
 
@@ -160,10 +160,10 @@ class TestCiGate:
         self, workspace: Path, tmp_path: Path, github: FakeGitHub
     ) -> None:
         class Lies:
-            async def on_test_failure(self, story, result, ctx):
+            async def on_test_failure(self, story, result, ctx, attempt):
                 raise AssertionError("not used")
 
-            async def on_ci_failure(self, epic, ci, pr, ctx):
+            async def on_ci_failure(self, epic, ci, pr, ctx, recheck):
                 return ci
 
         ctx, recorder, _, stage, branch = await finished_epic(workspace, tmp_path, github, failures=Lies())

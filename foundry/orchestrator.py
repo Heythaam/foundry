@@ -15,10 +15,13 @@ from foundry.context import (
     Artifact,
     ArtifactType,
     EnvFailure,
+    FailureCategory,
+    FoundryError,
     RunContext,
     check_model_alias,
     classify_exception,
 )
+from foundry.failures import fix_hint
 from foundry.gitops import GitOps
 from foundry.lock import STATUS_IN_PROGRESS, LockFile
 from foundry.phases import Phase, PhaseHooks
@@ -204,14 +207,36 @@ class Orchestrator:
     def _wants_revision(cls, hooks: PhaseHooks, approved: Artifact) -> bool:
         return bool(cls._hook(hooks, "requests_revision", approved))
 
-    @staticmethod
-    async def _run_stage(stage: Stage, ctx: RunContext, recorder: ProvenanceRecorder) -> None:
+    @classmethod
+    async def _run_stage(cls, stage: Stage, ctx: RunContext, recorder: ProvenanceRecorder) -> None:
         try:
             await stage.run(ctx, recorder)
         except CancelRequested:
             raise
         except Exception as exc:  # classify before propagating (AD-3)
-            raise classify_exception(exc) from exc
+            error = classify_exception(exc, f"stage {stage.name}")
+            if error.category is FailureCategory.ENVIRONMENT:
+                await cls._halt(stage.name, error, recorder)
+            if error is exc:
+                raise
+            raise error from exc
+
+    @staticmethod
+    async def _halt(stage: str, error: FoundryError, recorder: ProvenanceRecorder) -> None:
+        """An environment failure stops the run at once; save where, why and what to fix (FR-24).
+
+        The run stays in progress so `foundry resume` can pick it up. If saving itself fails (the
+        disk is full, git is gone) the original error is still the one the human sees.
+        """
+        error.fix = fix_hint(error)
+        where = {key: error.context[key] for key in ("epic", "story") if key in error.context}
+        try:
+            await recorder.record_halt(
+                stage, error.category.value, error.message, error.fix, where
+            )
+            error.context["halted"] = True
+        except Exception:
+            error.context["halted"] = False
 
     async def _run_phase(self, phase: Phase, artifact: Artifact, ctx: RunContext) -> Artifact:
         try:
