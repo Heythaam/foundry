@@ -284,8 +284,10 @@ async def whole_run(
     tmp_path: Path,
     runner: ImplementingRunner,
     command: str | None = None,
+    finalize: bool = False,
     **kwargs,
 ):
+    """idea to merged epics; with `finalize`, on to the Dockerfile and the completion record."""
     test_command = command or count_command(tmp_path)
     architecture = f"# Architecture\n\n## Test Runner\n\n```bash\n{test_command}\n```\n"
     planner = FakeRunner("# Brainstorm\n\nIdeas.\n", PRD, CLEAN, architecture, EPICS)
@@ -296,6 +298,12 @@ async def whole_run(
             gitops, runner, on_test_output=lambda t: None, say=lambda t: None, **kwargs
         ),
     ]
+    if finalize:
+        from foundry.dockerfile import DockerfileStage
+
+        stages.append(
+            DockerfileStage(gitops, runner, on_test_output=lambda t: None, say=lambda t: None)
+        )
     ctx = RunContext(idea="a todo tracker for the command line", workspace_path=workspace)
     orchestrator = Orchestrator(
         planning(planner), checkpoint=ScriptedCheckpoint(), stages=stages, gitops=gitops

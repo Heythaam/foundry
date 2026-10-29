@@ -379,6 +379,22 @@ class ProvenanceRecorder:
         )
         return section
 
+    async def record_dockerfile(self, fields: dict[str, Any]) -> str:
+        """Append [dockerfile] (FR-30) and commit it with the Dockerfile itself.
+
+        The commit takes the whole tree, so the Dockerfile and whatever else the session had to
+        change (a health endpoint, say) land together with the entry that describes them:
+        `foundry: dockerfile generated — <base image>, <port>` (FR-29).
+        """
+        await self._record(
+            action="dockerfile generated",
+            detail=f"{fields['base_image']}, {fields['port']}",
+            section="dockerfile",
+            fields={**fields, "generated_at": iso_utc(utc_now())},
+            paths=None,
+        )
+        return "dockerfile"
+
     async def record_halt(
         self,
         stage: str,

@@ -439,7 +439,7 @@ class TestCli:
         self, workspace: Path, github: FakeGitHub
     ) -> None:
         stages, gitops = REAL_BUILD_STAGES(workspace, False)
-        assert [s.name for s in stages] == ["repo", "implementation"]
+        assert [s.name for s in stages] == ["repo", "implementation", "finalization"]
         assert all(stage.git is gitops for stage in stages) and gitops.token == TOKEN
 
     def test_private_flag_reaches_the_repo_stage(self, workspace: Path, github: FakeGitHub) -> None:
