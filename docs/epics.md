@@ -623,6 +623,14 @@ So that my project is containerized and ready for any deployment platform.
 The developer can run `foundry quick "idea"` for spec-first implementation without the full planning pipeline.
 **FRs covered:** FR-2, FR-35, FR-36
 
+### Epic 8: CLI UX / Visuals
+The developer sees a spec interpretation readback before any code runs, receives named failure states when something breaks, and gets a clear phase signal at every boundary.
+**FRs covered:** FR-8-01 (spec readback), FR-8-02 (named failure states), FR-8-03 (phase signal)
+
+### Epic 9: Multi-tool / AgentRunner Compatibility
+The developer can run Foundry with Aider or OpenAI Codex CLI; any scriptable tool wires in via `foundry-agent.sh`; missing-runner failures produce actionable errors.
+**FRs covered:** FR-9-1 (AiderRunner), FR-9-2 (CodexRunner), FR-9-3 (runner config + error), FR-9-4 (contributor docs), FR-9-5 (shell runner)
+
 ---
 
 ## Epic 7 Stories
@@ -660,3 +668,167 @@ So that the output is structured and verified, not a single blob of code.
 **And** commits follow the `foundry: story Q.{N} implemented` format for traceability
 **And** on completion, a Dockerfile is generated (reuses Epic 6's finalization)
 **And** provenance is recorded for each increment
+
+---
+
+### Epic 8: CLI UX / Visuals
+The developer sees Foundry's interpretation of their spec before a single line of code runs, receives named failure states when something breaks, and gets a clear phase signal at every boundary — so the PR feels authored, not generated.
+**Design north star:** authorship, not relief. The spec is the control surface.
+
+---
+
+## Epic 8 Stories
+
+### Story 8.1: Spec Interpretation Readback
+
+As a developer,
+I want to see how Foundry parsed my spec before the first phase begins,
+So that I approve Foundry's interpretation of my intent — not its output after the fact.
+
+**Acceptance Criteria:**
+
+**Given** I have run `foundry pro "my idea"` and RunContext is initialized
+**When** the orchestrator is about to execute the first phase
+**Then** a structured readback is printed to stdout containing: inferred project name, language/framework, test runner, planned epic/story count, and any gaps Foundry filled by assumption
+**And** assumptions are visually distinguished from directly-parsed facts (e.g. a `~` prefix marker)
+**And** the run pauses and waits for a single keypress (Enter to proceed, Ctrl-C to abort)
+**And** if the user aborts (Ctrl-C / KeyboardInterrupt), the run exits cleanly with no phase having executed and no foundry.lock mutation
+**And** in `--yes` / non-interactive mode, the readback is printed to stdout and the run proceeds without waiting
+**And** the readback does not modify RunContext, foundry.lock, or any other mutable state
+
+**Dev Notes:** Implement as `SpecReadback` in a new `foundry/readback.py` module. Invoked from the orchestrator before phase 1, after RunContext is built. The `--yes` flag (established in Epic 7) governs the bypass behavior — verify the flag name is consistent before adding a new one.
+
+### Story 8.2: Named Failure States
+
+As a developer,
+I want every Foundry failure to name the phase, story, and specific error condition,
+So that I can locate and fix any failure without reading raw logs.
+
+**Acceptance Criteria:**
+
+**Given** any external call (agent, test runner, GitHub API) fails and the error escapes the orchestrator
+**When** the top-level exception handler processes the FoundryError
+**Then** the final line written to stderr follows the format `[<phase> / <story>] failed: <reason>` (story segment omitted when not in a story context)
+**And** agent timeout, non-zero exit, and empty-output validation failure are reported as three distinct conditions with distinct messages
+**And** for recoverable failures (missing env var, missing config key), the message includes a one-line remediation hint naming what to fix
+**And** no raw Python stack trace reaches the user as the final stderr output — the named failure line is always last
+**And** the failure category (code / infrastructure / environment) is preserved in the formatted output
+
+**Dev Notes:** Extend `FoundryError` in `foundry/context.py` with optional `phase: str` and `story: str` fields. Add a `format_failure_line(error: FoundryError) -> str` helper. Failure output goes to stderr; `FoundryError.fix` surfaces as the remediation hint. Update `ClaudeCodeRunner._finish` and `_invoke` to produce distinct messages for timeout, non-zero exit, and empty-output cases.
+
+### Story 8.3: Phase Signal
+
+As a developer,
+I want a brief summary of what completed and what comes next at every phase boundary,
+So that silence between phases is replaced with signal and the next step feels inevitable.
+
+**Acceptance Criteria:**
+
+**Given** a phase has just completed and the orchestrator is about to begin the next phase
+**When** the PhaseSignal is invoked at the boundary
+**Then** stdout shows the phase just completed (name + outcome count, e.g. `Architecture — 1 doc written`) and the phase about to begin (name + what it will produce, e.g. `Implementation — 4 stories, ~12 agent calls`)
+**And** the boundary signal fires before every phase, including the boundary before the final phase
+**And** the run then waits for a single keypress before proceeding
+**And** in `--yes` / non-interactive mode, or when no TTY is attached (CI), the signal is printed and the run proceeds without waiting
+**And** quick mode (RunContext.mode == "quick") invokes the signal at its phase boundaries with the same behavior
+
+**Dev Notes:** Implement as `PhaseSignal` in a new `foundry/signal.py` module. The orchestrator calls `PhaseSignal.present(completed_phase, next_phase)` at every boundary. TTY detection: `sys.stdout.isatty()` gates the wait. Reuses the `--yes` flag from Epic 7 for bypass. Phase signal is informational only — no lock writes.
+
+---
+
+### Epic 9: Multi-tool / AgentRunner Compatibility
+The developer can run Foundry's full pipeline with Aider or OpenAI Codex CLI instead of Claude Code; any scriptable tool can be wired in via a shell script convention; and missing-runner failures produce actionable errors rather than tracebacks.
+**Key constraint:** The `AgentRunner` protocol in `foundry/agent.py` does not change — this epic adds implementations, not a new seam.
+
+---
+
+## Epic 9 Stories
+
+### Story 9.1: AiderRunner Implementation
+
+As a developer,
+I want to run Foundry's pipeline using Aider as the agent tool,
+So that Claude Code is no longer a hard dependency on machines where Aider is the preferred tool.
+
+**Acceptance Criteria:**
+
+**Given** `agent.runner = "aider"` is set in project config and Aider is installed
+**When** a story requires agent execution
+**Then** `AiderRunner` invokes `aider` with the story prompt file and captures its output
+**And** Aider's exit codes are mapped to the FoundryError taxonomy (code / infrastructure / environment) following the same classification logic as `ClaudeCodeRunner`
+**And** if Aider is not found on PATH, an `EnvFailure` is raised that names the tool, the config key, and the install command — no raw `FileNotFoundError` escapes
+**And** `AiderRunner` passes the same integration test harness used for `ClaudeCodeRunner` (env-gated: `FOUNDRY_INTEGRATION_AIDER=1`)
+**And** `AiderRunner` implements the existing `AgentRunner` protocol from `foundry/agent.py` without any modification to that protocol
+
+**Dev Notes:** Implement in `foundry/runners/aider.py` under a new `foundry/runners/` package. Run a spike against the current Aider release before writing the implementation to confirm the stable CLI invocation pattern (OQ-9.1). Lock the AgentRunner interface contract (OQ-9.3) before writing this story if it hasn't been done. Aider flag to use: `--message-file <path>` or equivalent non-interactive flag for the current release.
+
+### Story 9.2: OpenAI Codex CLI Runner Implementation
+
+As a developer,
+I want to run Foundry's pipeline using OpenAI Codex CLI as the agent tool,
+So that a second distinct tool family is proven compatible and Claude Code is never the sole option.
+
+**Acceptance Criteria:**
+
+**Given** `agent.runner = "codex"` is set and OpenAI Codex CLI is installed
+**When** a story requires agent execution
+**Then** `CodexRunner` invokes the Codex CLI with the story prompt and captures its output
+**And** exit codes and error conditions map to the FoundryError taxonomy following the same pattern as `AiderRunner`
+**And** runner-not-found raises an `EnvFailure` with tool name, config key, and install command
+**And** `CodexRunner` passes the integration test harness (env-gated: `FOUNDRY_INTEGRATION_CODEX=1`)
+**And** at the end of this story, two non-Claude runners exist in the codebase and both pass the harness
+
+**Dev Notes:** Implement in `foundry/runners/codex.py`. If OQ-9.1 spike shows Codex CLI's interface is unstable, substitute the next-priority tool and name the module accordingly. The two-runner milestone at the end of this story is a hard requirement — if one harness is flaky, fix it before closing the story.
+
+### Story 9.3: Runner Config and Runner-Not-Found Error
+
+As a developer,
+I want to select my agent runner via a config key and get a clear error when the selected runner is missing,
+So that I can switch runners without editing code and recover from a missing tool in under a minute.
+
+**Acceptance Criteria:**
+
+**Given** a `foundry.toml` file at the project root with `[agent] runner = "<name>"`
+**When** `foundry pro` starts
+**Then** the orchestrator instantiates the runner named in config; valid values are `"claude-code"` (default), `"aider"`, `"codex"`, `"shell"`
+**And** if the value is unrecognized, the run exits immediately with an `EnvFailure` listing the valid runner names
+**And** if the named runner's binary is not found, stderr names: the missing tool, the config key (`agent.runner`), and the exact install command or documentation URL — no raw traceback
+**And** the runner name is recorded in `foundry.lock` under `[run].runner`
+**And** when `foundry.toml` is absent, `agent.runner` defaults to `"claude-code"` and the run proceeds identically to pre-Epic-9 behavior
+
+**Dev Notes:** If `foundry.toml` does not yet exist as a config surface, introduce it minimally here with only the `[agent]` section. Update `ClaudeCodeRunner`'s existing `FileNotFoundError` path (`foundry/agent.py` lines 143–146) to match the CAP-2 pattern — this is the one place where the existing runner-not-found message needs updating.
+
+### Story 9.4: Shell Runner (foundry-agent.sh)
+
+As a developer,
+I want to wire any scriptable tool into Foundry by placing a `foundry-agent.sh` script at my repo root,
+So that I can use an internal LLM wrapper, a local automation, or any other tool without writing Python.
+
+**Acceptance Criteria:**
+
+**Given** `agent.runner = "shell"` is set and `foundry-agent.sh` exists at the repo root (or configured path)
+**When** a story requires agent execution
+**Then** Foundry invokes `./foundry-agent.sh <story-file-path>` with the story file path as `$1`, with `cwd` set to the workspace root
+**And** exit code 0 is treated as success; the script's stdout becomes the `AgentResult.text`
+**And** non-zero exit is treated as `CodeFailure` with the script's stderr as the reason
+**And** if `foundry-agent.sh` is not found at the configured path or repo root, an `EnvFailure` is raised explaining the lookup path and fallback options
+**And** `ShellRunner` declares no optional capabilities (streaming, interactive checkpoints, dry-run); the orchestrator emits a one-line warning — not an error — if the active phase requires a capability the runner does not declare
+**And** the behavior when Foundry is used outside a git repo follows the decision made for OQ-9.2
+
+**Dev Notes:** Implement in `foundry/runners/shell.py`. Resolve OQ-9.2 (repo-root lookup outside a git repo) before implementing discovery. Capability advertisement: add a minimal `capabilities: frozenset[str]` attribute to the `AgentRunner` protocol (this is an additive change — existing runners return `frozenset()` by default, so no protocol change forces existing implementations to update).
+
+### Story 9.5: AgentRunner Contributor Documentation
+
+As a contributor,
+I want a single document that explains everything I need to add a new AgentRunner,
+So that I can ship a working runner without reading source beyond what the document references.
+
+**Acceptance Criteria:**
+
+**Given** `docs/adding-a-runner.md` exists in the repository
+**When** a contributor with no prior Foundry knowledge reads it
+**Then** the document covers, in order: (1) the AgentRunner protocol definition and field-by-field explanation, (2) the FoundryError taxonomy and how to map tool failures to it, (3) the runner-not-found pattern (EnvFailure with tool name, config key, install command), (4) how to register a new runner (module location, config key value), (5) how to run integration tests locally including the env-flag convention, (6) a review checklist of 5–6 items
+**And** the document includes a minimal complete example: a runner for a hypothetical CLI tool named `mytool`
+**And** a human reviewer has approved the document before the story is closed (done_checkpoint)
+
+**Dev Notes:** Write `docs/adding-a-runner.md`. Pull the `AgentRunner` Protocol definition verbatim from `foundry/agent.py` so the doc and code stay in sync. Reference `AiderRunner` and `ShellRunner` as worked examples alongside the hypothetical `mytool` example. The done_checkpoint on this story means a human reviewer should read it end-to-end and confirm a new contributor could follow it without help.
