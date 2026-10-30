@@ -26,3 +26,12 @@ recorded_at = "2026-10-30T10:30:23Z"
 [run.test_runner]
 command = "pip install -e '.[dev]' && pytest -v"
 source_hash = "sha256:12831cd9b570d40b661d6ded8cbaa414808561cd395e5ccf25f4b043f324150c"
+
+[halts.halt-1]
+stage = "repo"
+category = "environment"
+message = "the scaffold would overwrite existing files: .gitignore, README.md. Run foundry in an empty directory."
+fix = "Fix the problem described above."
+halted_at = "2026-10-30T10:30:23Z"
+branch = "main"
+head_sha = "b459f276b86e7ddaedcdf43c7be1b71b3bc134fc"
