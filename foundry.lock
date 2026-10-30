@@ -22,3 +22,7 @@ phase = "spec"
 type = "spec"
 artifact_hash = "sha256:12831cd9b570d40b661d6ded8cbaa414808561cd395e5ccf25f4b043f324150c"
 recorded_at = "2026-10-30T10:30:23Z"
+
+[run.test_runner]
+command = "pip install -e '.[dev]' && pytest -v"
+source_hash = "sha256:12831cd9b570d40b661d6ded8cbaa414808561cd395e5ccf25f4b043f324150c"
