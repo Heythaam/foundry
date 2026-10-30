@@ -111,6 +111,58 @@ class TestProCreatesLock:
         assert (workspace / "foundry.lock").read_bytes() == before
 
 
+class TestYesFlag:
+    def test_pro_has_yes_option(self) -> None:
+        result = runner.invoke(app, ["pro", "--help"])
+        assert result.exit_code == 0
+        assert "--yes" in result.output
+
+    def test_quick_has_yes_option(self) -> None:
+        result = runner.invoke(app, ["quick", "--help"])
+        assert result.exit_code == 0
+        assert "--yes" in result.output
+
+    def test_pro_yes_flag_runs_successfully(self, workspace: "Path") -> None:
+        result = runner.invoke(app, ["pro", "--yes", "build a todo app"])
+        assert result.exit_code == 0, result.output
+
+    def test_quick_yes_flag_runs_successfully(self, workspace: "Path") -> None:
+        result = runner.invoke(app, ["quick", "--yes", "build a URL shortener"])
+        assert result.exit_code == 0, result.output
+
+    def test_pro_yes_prints_readback(self, workspace: "Path") -> None:
+        result = runner.invoke(app, ["pro", "--yes", "build a todo app"])
+        assert result.exit_code == 0, result.output
+        assert "Project name" in result.output
+
+    def test_quick_yes_prints_readback(self, workspace: "Path") -> None:
+        result = runner.invoke(app, ["quick", "--yes", "build a URL shortener"])
+        assert result.exit_code == 0, result.output
+        assert "Project name" in result.output
+
+    def test_yes_bypasses_readback_even_with_tty_active(
+        self, workspace: "Path", monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ctx.yes=True must bypass input() wait even when stdin and stdout claim to be a TTY."""
+        import sys
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        result = runner.invoke(app, ["pro", "--yes", "build a todo app"])
+        assert result.exit_code == 0, result.output
+
+    def test_phase_signal_checkmark_printed_for_multi_phase_run(
+        self, workspace: "Path", monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With 2 phases, the phase signal fires and prints ✓ to stdout."""
+        from foundry.phases import StubPhase
+
+        monkeypatch.setattr("foundry.cli._default_phases", lambda: [StubPhase("p1"), StubPhase("p2")])
+        result = runner.invoke(app, ["pro", "--yes", "build a todo app"])
+        assert result.exit_code == 0, result.output
+        assert "✓" in result.output  # ✓
+
+
 class TestModelPinning:
     def test_exact_model_id_from_env_is_recorded_in_run_section(
         self, workspace: Path, monkeypatch: pytest.MonkeyPatch

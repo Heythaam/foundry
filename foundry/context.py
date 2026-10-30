@@ -55,6 +55,23 @@ class FoundryError(Exception):
         self.context = context or {}
         self.fix = fix  # what the human should do about it, when we know
         self.source: str | None = None  # which external call failed, once classified
+        self.phase: str | None = None  # which phase raised the error, when known
+        self.story: str | None = None  # which story raised the error, when known
+
+
+def format_failure_line(err: FoundryError) -> str:
+    """Return a single formatted failure line: `[<phase> / <story>] failed: <reason>`.
+
+    Both fields are always shown; `-` is used as a placeholder when phase or story is None.
+    When `fix` is set, the hint appears on the next line. The `[...] failed: ...` part
+    never contains an embedded newline so the caller can safely write it as the final stderr line.
+    """
+    phase = err.phase or "-"
+    story = err.story or "-"
+    line = f"[{phase} / {story}] failed: {err.message.splitlines()[0]}"
+    if err.fix:
+        line = f"{line}\nTo fix: {err.fix}"
+    return line
 
 
 class CodeFailure(FoundryError):
@@ -173,6 +190,7 @@ class RunContext:
     start_time: datetime = field(default_factory=utc_now)
     review_epics: bool = False  # --review-epics: checkpoint before each epic (FR-6)
     mode: str = "pro"  # "pro" (full planning pipeline) or "quick" (spec first, FR-2)
+    yes: bool = False  # --yes: skip all interactive gates; still prints readback and signals
     # Approved artifact per phase name, filled by the orchestrator only. A phase's `input` is
     # just the previous phase's output; this is how it reads an earlier one (e.g. the PRD).
     upstream: dict[str, Artifact] = field(default_factory=dict, repr=False)
