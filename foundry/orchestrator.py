@@ -65,17 +65,39 @@ class Orchestrator:
         self.stages = list(stages)  # run after the phases: repo transition, implementation
 
     async def run(self, ctx: RunContext) -> RunResult:
+        from foundry.readback import SpecReadback
+        from foundry.signal import PhaseSignal
+
         check_model_alias(ctx.model_id)
         await asyncio.to_thread(self._ensure_can_start, ctx)
         await asyncio.to_thread(clear_cancel, ctx.workspace_path)  # a sentinel from a dead run
         recorder = ProvenanceRecorder(ctx.workspace_path, self.gitops)
         await recorder.record_run_start(ctx)
 
+        # Spec interpretation readback (Story 8.1) — before any phase executes.
+        await asyncio.to_thread(SpecReadback().present, ctx)
+
         artifact = Artifact(content=ctx.idea, type=ArtifactType.IDEA)
-        for phase in self.phases:
+        for i, phase in enumerate(self.phases):
             if is_cancel_requested(ctx.workspace_path):
                 return await self._cancel(ctx, recorder, artifact, before=f"phase {phase.name}")
-            artifact = await self._execute(phase, artifact, ctx, recorder)
+            try:
+                artifact = await self._execute(phase, artifact, ctx, recorder)
+            except FoundryError as err:
+                if err.phase is None:
+                    err.phase = phase.name
+                raise
+            # Phase boundary signal (Story 8.3) — after each phase except the last.
+            if i < len(self.phases) - 1:
+                next_phase = self.phases[i + 1]
+                await asyncio.to_thread(
+                    PhaseSignal().present,
+                    phase.name,
+                    "completed",
+                    next_phase.name,
+                    f"produce {next_phase.name} artifact",
+                    ctx,
+                )
 
         return await self._finish(ctx, recorder, artifact)
 

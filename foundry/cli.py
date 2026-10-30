@@ -36,7 +36,7 @@ def _fail(message: str) -> typer.Exit:
 def _fail_with(err: FoundryError) -> typer.Exit:
     """Report an error. An environment failure says what to fix; one that stopped a run and
     was saved to the lock also says how to continue (FR-24)."""
-    from foundry.context import FailureCategory
+    from foundry.context import FailureCategory, format_failure_line
     from foundry.failures import GENERIC_FIX, describe_halt, fix_hint
 
     saved = err.context.get("halted")
@@ -47,7 +47,13 @@ def _fail_with(err: FoundryError) -> typer.Exit:
         message = err.message if hint == GENERIC_FIX else f"{err.message}\nTo fix: {hint}"
         if saved is False:
             message += "\n(The failure could not be saved to foundry.lock.)"
+        # Append the location prefix when phase info is available; strip fix hint to avoid duplicate.
+        if err.phase is not None:
+            message = f"{message}\n{format_failure_line(err).splitlines()[0]}"
         return _fail(message)
+    # For code and infra failures, the named failure line IS the message.
+    if err.phase is not None:
+        return _fail(format_failure_line(err))
     return _fail(err.message)
 
 
@@ -95,11 +101,14 @@ def pro(
     private: bool = typer.Option(
         False, "--private", help="Create the GitHub repository as private (default: public)."
     ),
+    yes: bool = typer.Option(
+        False, "--yes", help="Skip all interactive gates; still prints readback and phase summaries."
+    ),
 ) -> None:
     """Start a full planning-pipeline run with mandatory human checkpoints."""
     from foundry.orchestrator import Orchestrator, RunStatus
 
-    ctx = RunContext(idea=idea, review_epics=review_epics)
+    ctx = RunContext(idea=idea, review_epics=review_epics, yes=yes)
     try:
         stages, gitops = _build_stages(ctx.workspace_path, private)
         orchestrator = Orchestrator(_default_phases(), stages=stages, gitops=gitops)
@@ -117,13 +126,16 @@ def quick(
     private: bool = typer.Option(
         False, "--private", help="Create the GitHub repository as private (default: public)."
     ),
+    yes: bool = typer.Option(
+        False, "--yes", help="Skip all interactive gates; still prints readback and phase summaries."
+    ),
 ) -> None:
     """Skip planning: write a one-page spec, review it, then build it in tested increments."""
     from foundry.orchestrator import Orchestrator, RunStatus
 
     if not idea.strip():
         raise _fail("The idea is empty. Describe what to build, e.g. foundry quick \"a URL shortener\".")
-    ctx = RunContext(idea=idea, mode="quick")
+    ctx = RunContext(idea=idea, mode="quick", yes=yes)
     try:
         stages, gitops = _build_stages(ctx.workspace_path, private, quick=True)
         orchestrator = Orchestrator(_quick_phases(), stages=stages, gitops=gitops)
