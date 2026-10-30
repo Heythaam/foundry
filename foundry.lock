@@ -16,3 +16,9 @@ editor_open = "2026-10-30T10:30:04Z"
 editor_close = "2026-10-30T10:30:23Z"
 duration_seconds = 18
 approved_without_edits = true
+
+[artifacts.spec]
+phase = "spec"
+type = "spec"
+artifact_hash = "sha256:12831cd9b570d40b661d6ded8cbaa414808561cd395e5ccf25f4b043f324150c"
+recorded_at = "2026-10-30T10:30:23Z"
