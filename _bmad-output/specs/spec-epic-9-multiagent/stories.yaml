@@ -1,0 +1,98 @@
+- id: "9-1"
+  title: AiderRunner Implementation
+  description: >-
+    Implement a concrete AgentRunner for Aider that passes the same integration test
+    harness used by ClaudeCodeRunner; first non-Claude runner in the codebase (CAP-1).
+  spec_checkpoint: true
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Before implementing: run a spike against the current Aider release to confirm the CLI contract
+    (see OQ-9.1). Lock the AgentRunner interface contract first if it hasn't been done yet (OQ-9.3).
+    Implement AiderRunner in foundry/runners/aider.py (new module under a new foundry/runners/ package).
+    AiderRunner implements the existing AgentRunner protocol from foundry/agent.py — do not change the protocol.
+    Aider invocation: write the story to the prompt file (.foundry/current-story.md), invoke
+    `aider --message-file <path>` (or equivalent stable flag), capture stdout, map exit codes to
+    FoundryError subclasses following the same taxonomy as ClaudeCodeRunner.
+    Runner-not-found for Aider (shutil.which returns None) must raise EnvFailure with the tool name,
+    config key, and install command — do not raise FileNotFoundError raw (this is CAP-2 work, ensure
+    the pattern is in place for this runner).
+    Add AiderRunner to an integration test fixture that runs the same harness as ClaudeCodeRunner tests;
+    use an env-gated flag (FOUNDRY_INTEGRATION_AIDER=1) to skip in CI without the tool.
+
+- id: "9-2"
+  title: OpenAI Codex CLI Runner Implementation
+  description: >-
+    Implement a concrete AgentRunner for OpenAI Codex CLI (or next-priority tool per OQ-9.1
+    spike results); second non-Claude runner, proving the pattern across tool families (CAP-1).
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implement the second runner (OpenAI Codex CLI unless OQ-9.1 spike redirects to another tool)
+    in foundry/runners/codex.py (or appropriately named module).
+    Follow the same pattern established by AiderRunner in Story 9.1.
+    Codex CLI invocation: write prompt to .foundry/current-story.md, invoke `codex` with appropriate
+    flags to read the file and run non-interactively; map exit codes to FoundryError taxonomy.
+    Runner-not-found must follow CAP-2 pattern: EnvFailure with tool name, config key, install command.
+    Add to the integration test harness under FOUNDRY_INTEGRATION_CODEX=1 env flag.
+    At the end of this story, two non-Claude runners exist — verify both pass the harness.
+
+- id: "9-3"
+  title: Runner Config and Runner-Not-Found Error
+  description: >-
+    Add the agent.runner config key to select the active runner; wire runner-not-found
+    into a structured error for all runners including ClaudeCodeRunner (CAP-2).
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Add agent.runner config key support. If foundry.toml does not yet exist as a project-local
+    config surface, introduce it as a minimal TOML file with only [agent] section for now.
+    Config key: agent.runner, values: "claude-code" (default), "aider", "codex", "shell".
+    Load the config in RunContext or a new Config dataclass; wire runner instantiation in the
+    orchestrator's entry point based on the config value.
+    Ensure ClaudeCodeRunner's FileNotFoundError path (already in agent.py line 143-146) is updated
+    to follow the CAP-2 pattern: EnvFailure message must include tool name, config key name, and
+    install command ("install Claude Code: https://claude.ai/download" or equivalent).
+    For an unknown runner name in config, raise EnvFailure listing valid runner names.
+    Record the runner name in foundry.lock under [run].runner.
+    Tests: config loading (default, each named runner, unknown runner), runner-not-found for each
+    runner type, lock entry for runner name.
+
+- id: "9-4"
+  title: Shell Runner (foundry-agent.sh)
+  description: >-
+    Implement ShellRunner: recognizes foundry-agent.sh as a valid AgentRunner via the
+    Unix-pipe convention; makes any scriptable tool wire-compatible without Python (CAP-3).
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implement ShellRunner in foundry/runners/shell.py.
+    Discovery: when agent.runner = "shell", look for foundry-agent.sh at (1) the configured path
+    from config, (2) repo root (ctx.workspace_path / 'foundry-agent.sh').
+    If no git repo root is found (OQ-9.2 option a): skip shell runner and raise EnvFailure with
+    a message explaining the lookup and fallback options — do not silently fail.
+    Invocation: subprocess.run(['./foundry-agent.sh', str(story_path)], cwd=workspace_path).
+    Protocol: exit 0 = success (AgentResult with stdout as text), non-zero = CodeFailure.
+    Capability advertisement: ShellRunner.capabilities = frozenset() — it declares no optional
+    capabilities (streaming, interactive checkpoints, dry-run). The orchestrator emits a one-line
+    warning (not error) if the pipeline phase requires a capability ShellRunner doesn't declare.
+    Tests: discovery at repo root, missing script raises EnvFailure, exit-0 produces AgentResult,
+    non-zero produces CodeFailure, capability warning is emitted for a mock phase that requires streaming.
+
+- id: "9-5"
+  title: AgentRunner Contributor Documentation
+  description: >-
+    Write the single document a contributor needs to add a new AgentRunner without reading source
+    beyond what the doc references; sufficient to ship a working runner alone (CAP-4).
+  spec_checkpoint: false
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Write docs/adding-a-runner.md (new file).
+    The document must cover, in order:
+    1. The AgentRunner protocol (copy the Protocol definition from foundry/agent.py, explain each field).
+    2. The FoundryError taxonomy and how a runner maps tool failures to it (code / infra / env).
+    3. The runner-not-found pattern (CAP-2): how to raise EnvFailure with tool name, config key, install command.
+    4. How to register a new runner (where to add it, the config key value to map).
+    5. How to run the integration tests locally, including the env flag convention.
+    6. Review checklist (5-6 items: protocol conformance, runner-not-found pattern, integration test, config entry, lock recording).
+    Include a minimal complete example: a runner that calls a hypothetical CLI tool `mytool`.
+    The done_checkpoint is true — have a human review the doc before closing the epic.

@@ -1,0 +1,57 @@
+- id: "8-1"
+  title: Spec Interpretation Readback
+  description: >-
+    Parse the idea/spec string before any phase executes and display a structured
+    readback of Foundry's interpretation; block until the user approves or aborts (CAP-1).
+  spec_checkpoint: true
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implement a SpecReadback component in foundry/readback.py (new module).
+    Parse RunContext.idea for: project name, likely language/framework, test runner signal,
+    planned phase count, and any gaps filled by assumption.
+    Assumptions must be visually distinguished from directly-parsed facts (e.g. a '~' prefix).
+    Print the readback to stdout, then prompt for a single keypress ('Press Enter to proceed, Ctrl-C to abort').
+    In --yes / non-interactive mode (ctx.yes flag), print the readback and continue without waiting.
+    Invoked from the orchestrator before the first phase, after RunContext is built.
+    Tests should cover: readback content fields, assumption vs fact distinction,
+    --yes bypass, abort path (KeyboardInterrupt / Ctrl-C), and that no lock state is mutated.
+
+- id: "8-2"
+  title: Named Failure States
+  description: >-
+    Ensure every FoundryError that escapes the orchestrator carries phase and story context,
+    and that the final line on stderr is always a named failure state or success confirmation (CAP-2).
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Extend FoundryError in foundry/context.py with optional `phase: str` and `story: str` fields.
+    Add a format_failure_line(error: FoundryError) -> str helper that produces '[phase / story] failed: reason'
+    (omitting the story segment when story is None).
+    Update the orchestrator's top-level exception handler to call format_failure_line and write it
+    as the final line to stderr before exit.
+    Distinguish agent timeout (InfraFailure from asyncio.timeout), non-zero exit (CodeFailure),
+    and empty-output validation (CodeFailure) in the error messages produced by ClaudeCodeRunner.
+    For recoverable EnvFailures (missing env var, missing config key), include a one-line
+    remediation hint in FoundryError.fix and surface it in the formatted output.
+    Tests should cover: format_failure_line for all three agent failure types, env failure with fix hint,
+    phase/story context propagation, and that stderr ends with exactly one named-state line.
+
+- id: "8-3"
+  title: Phase Signal
+  description: >-
+    At every phase boundary print a brief summary of what completed and what comes next,
+    then wait for a single keypress before the next phase begins (CAP-3).
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implement a PhaseSignal component in foundry/signal.py (new module).
+    It receives: completed phase name, outcome summary (e.g. '1 doc written'), next phase name,
+    next phase description (e.g. '4 stories, ~12 agent calls').
+    Prints the summary to stdout and waits for Enter (any key acceptable).
+    In --yes / non-interactive / CI (no TTY) mode, prints the summary and continues without waiting.
+    The orchestrator calls PhaseSignal.present() at every phase boundary, including the boundary
+    before the final phase.
+    Quick mode (RunContext.mode == 'quick') must invoke PhaseSignal at its own phase boundaries —
+    verify quick mode has at least one boundary; if it has none, add a test asserting that expectation.
+    Tests should cover: output format, --yes bypass, CI/no-TTY bypass, quick mode boundary,
+    and that no lock state is mutated by the signal call.
