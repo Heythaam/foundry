@@ -1,5 +1,9 @@
 # Foundry runtime state (cancel sentinel, ephemeral state.db WAL, prompt files)
 .foundry/
+foundry.lock
+
+# BMad build artifacts
+_bmad-output/brainstorming/
 
 # Python
 __pycache__/
