@@ -7,6 +7,7 @@ story and safe to run while `foundry pro` or `foundry resume` is working in anot
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from foundry.progress import (
     PHASE_DONE,
@@ -165,3 +166,88 @@ def render_quick_status(data: dict, progress: RunProgress, now: datetime | None 
         if halt.get("fix"):
             lines.append(f"  To fix:      {halt['fix']}")
     return "\n".join(lines)
+
+
+def rich_render_status(
+    progress: RunProgress, data: dict | None = None, now: datetime | None = None
+) -> None:
+    """Rich version of render_status using console.print_status."""
+    from foundry.console import print_status
+
+    now = now or datetime.now(timezone.utc)
+    if progress.mode == "quick":
+        from foundry.quick import quick_progress
+
+        quick = quick_progress(data or {}) if data else None
+        status = _status_line(progress)
+        if progress.status == "cancelled":
+            status = "cancelled (a quick run cannot be resumed)"
+        pdata: dict[str, Any] = {
+            "run_id": progress.run_id,
+            "idea": progress.idea,
+            "mode": "quick",
+            "status_text": status,
+            "phase_text": _quick_phase_line(data or {}, progress) if data else _phase_line(progress),
+        }
+        if quick and quick.planning_done:
+            extra = f" ({len(quick.deferred)} deferred)" if quick.deferred else ""
+            pdata["increments_text"] = (
+                f"{len(quick.implemented)} of {len(quick.planned)} committed{extra}"
+            )
+        if progress.dockerfile:
+            image, port = progress.dockerfile.get("base_image"), progress.dockerfile.get("port")
+            pdata["dockerfile_text"] = f"generated ({image}, port {port})"
+        pdata["model"] = progress.model
+        pdata["started_at"] = progress.started_at
+        pdata["elapsed_text"] = format_duration(progress.elapsed_seconds)
+        if progress.last_action_at:
+            age = (now - parse_timestamp(progress.last_action_at)).total_seconds()
+            pdata["last_action_text"] = f"{progress.last_action_at} ({format_duration(age)} ago)"
+        if progress.last_halt:
+            halt = progress.last_halt
+            pdata["stopped_text"] = halt.get("message", "")
+            if halt.get("fix"):
+                pdata["to_fix_text"] = halt["fix"]
+        print_status(pdata)
+        return
+
+    pdata = {
+        "run_id": progress.run_id,
+        "idea": progress.idea,
+        "status_text": _status_line(progress),
+        "phase_text": _phase_line(progress),
+    }
+    if progress.plan_complete:
+        extras = []
+        if progress.deferred:
+            extras.append(f"{len(progress.deferred)} deferred")
+        if progress.skipped_in_review:
+            extras.append(f"{len(progress.skipped_in_review)} skipped in review")
+        suffix = f" ({', '.join(extras)})" if extras else ""
+        pdata["stories_text"] = (
+            f"{progress.completed_count} of {progress.stories_total} completed{suffix}"
+        )
+        pdata["epics_text"] = f"{len(progress.merged_epics)} of {progress.epics_total} merged"
+    if progress.dockerfile:
+        image, port = progress.dockerfile.get("base_image"), progress.dockerfile.get("port")
+        pdata["dockerfile_text"] = f"generated ({image}, port {port})"
+    model = progress.model
+    if progress.pending_model_change:
+        change = progress.pending_model_change
+        model += f" (changed from {change.original_model}; a consistency pass follows the current epic)"
+    pdata["model"] = model
+    pdata["started_at"] = progress.started_at
+    pdata["elapsed_text"] = format_duration(progress.elapsed_seconds)
+    if progress.last_action_at:
+        age = (now - parse_timestamp(progress.last_action_at)).total_seconds()
+        pdata["last_action_text"] = f"{progress.last_action_at} ({format_duration(age)} ago)"
+    if progress.resumes or progress.cancellations:
+        pdata["history_text"] = (
+            f"resumed {progress.resumes} time(s), cancelled {progress.cancellations} time(s)"
+        )
+    if progress.last_halt:
+        halt = progress.last_halt
+        pdata["stopped_text"] = halt.get("message", "")
+        if halt.get("fix"):
+            pdata["to_fix_text"] = halt["fix"]
+    print_status(pdata)
