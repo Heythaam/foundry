@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from foundry.agent import print_to_terminal
+from foundry.console import print_test_result, print_test_running
 from foundry.context import EnvFailure, classify_exception
 
 DEFAULT_TIMEOUT_SECONDS = 1800.0
@@ -77,6 +78,7 @@ async def run_test_command(
     timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
     on_output: Callable[[str], None] = print_to_terminal,
 ) -> GateResult:
+    print_test_running()
     started = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -101,7 +103,8 @@ async def run_test_command(
             captured += len(chunk)
             while captured > _MAX_CAPTURE_BYTES and len(chunks) > 1:
                 captured -= len(chunks.pop(0))
-            on_output(chunk.decode("utf-8", errors="replace"))
+            if on_output is not None and on_output is not print_to_terminal:
+                on_output(chunk.decode("utf-8", errors="replace"))
 
     reader = asyncio.create_task(drain())
     timed_out = False
@@ -135,12 +138,14 @@ async def run_test_command(
             "Fix `[run.test_runner]` in the architecture or install what it needs.",
             {"command": command, "exit_code": exit_code},
         )
+    passed = exit_code == 0
+    print_test_result(passed, output)
     return GateResult(
-        passed=exit_code == 0,
+        passed=passed,
         exit_code=exit_code,
         output=output,
         duration_seconds=time.monotonic() - started,
-        tests_passed=parse_tests_passed(output) if exit_code == 0 else None,
+        tests_passed=parse_tests_passed(output) if passed else None,
         timed_out=timed_out,
     )
 

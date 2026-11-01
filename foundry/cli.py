@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 
@@ -29,7 +29,9 @@ app = typer.Typer(
 
 
 def _fail(message: str) -> typer.Exit:
-    typer.echo(message, err=True)
+    from foundry.console import console
+
+    console.print(message)
     return typer.Exit(code=1)
 
 
@@ -57,16 +59,54 @@ def _fail_with(err: FoundryError) -> typer.Exit:
     return _fail(err.message)
 
 
+def _wrap_phase_with_transitions(phase: Phase) -> Phase:
+    from foundry.console import print_phase_complete, print_phase_start
+
+    class _TransitionWrappedPhase:
+        def __init__(self, inner: Phase) -> None:
+            self._inner = inner
+            self.name = inner.name
+            self.checkpoint = inner.checkpoint
+            if hasattr(inner, "revise_target"):
+                self.revise_target = inner.revise_target
+
+        def checkpoint_fields(self, approved: Any) -> dict[str, Any]:
+            if hasattr(self._inner, "checkpoint_fields"):
+                return self._inner.checkpoint_fields(approved)
+            return {}
+
+        def derived_sections(self, approved: Any) -> dict[str, dict[str, Any]]:
+            if hasattr(self._inner, "derived_sections"):
+                return self._inner.derived_sections(approved)
+            return {}
+
+        def requests_revision(self, approved: Any) -> bool:
+            if hasattr(self._inner, "requests_revision"):
+                return self._inner.requests_revision(approved)
+            return False
+
+        async def run(self, input: Any, ctx: RunContext) -> Any:
+            print_phase_start(self.name)
+            res = await self._inner.run(input, ctx)
+            print_phase_complete(self.name)
+            return res
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+    return _TransitionWrappedPhase(phase)
+
+
 def _default_phases() -> list[Phase]:
     from foundry.pipeline import build_pipeline
 
-    return build_pipeline()
+    return [_wrap_phase_with_transitions(p) for p in build_pipeline()]
 
 
 def _quick_phases() -> list[Phase]:
     from foundry.quick import build_quick_pipeline
 
-    return build_quick_pipeline()
+    return [_wrap_phase_with_transitions(p) for p in build_quick_pipeline()]
 
 
 def _build_stages(
@@ -106,6 +146,7 @@ def pro(
     ),
 ) -> None:
     """Start a full planning-pipeline run with mandatory human checkpoints."""
+    from foundry.console import console
     from foundry.orchestrator import Orchestrator, RunStatus
 
     ctx = RunContext(idea=idea, review_epics=review_epics, yes=yes)
@@ -117,7 +158,7 @@ def pro(
         raise _fail_with(err) from err
     if result.status is RunStatus.CANCELLED:
         raise _fail(f"Run {ctx.run_id} cancelled.")
-    typer.echo(f"Run {ctx.run_id} finished.")
+    console.print(f"Run {ctx.run_id} finished.")
 
 
 @app.command()
@@ -131,6 +172,7 @@ def quick(
     ),
 ) -> None:
     """Skip planning: write a one-page spec, review it, then build it in tested increments."""
+    from foundry.console import console
     from foundry.orchestrator import Orchestrator, RunStatus
 
     if not idea.strip():
@@ -144,7 +186,7 @@ def quick(
         raise _fail_with(err) from err
     if result.status is RunStatus.CANCELLED:
         raise _fail(f"Run {ctx.run_id} cancelled. A quick run cannot be resumed.")
-    typer.echo(f"Run {ctx.run_id} finished.")
+    console.print(f"Run {ctx.run_id} finished.")
 
 
 @app.command()
@@ -154,6 +196,7 @@ def resume(
     ),
 ) -> None:
     """Continue an interrupted run from its last completed story."""
+    from foundry.console import console
     from foundry.gitops import GitOps
     from foundry.orchestrator import Orchestrator, RunStatus
     from foundry.resume import ResumeCoordinator, context_from_lock
@@ -169,7 +212,7 @@ def resume(
         raise _fail_with(err) from err
     if result.status is RunStatus.CANCELLED:
         raise _fail(f"Run {ctx.run_id} cancelled. `foundry resume` continues it.")
-    typer.echo(f"Run {ctx.run_id} finished.")
+    console.print(f"Run {ctx.run_id} finished.")
 
 
 @app.command()
@@ -177,7 +220,7 @@ def status() -> None:
     """Show where the current run stands."""
     from foundry.lock import LockFile
     from foundry.progress import progress_from_lock
-    from foundry.status import NO_RUN_MESSAGE, render_quick_status, render_status
+    from foundry.status import NO_RUN_MESSAGE, rich_render_status
 
     try:
         data = LockFile.for_workspace(Path.cwd()).read()
@@ -186,13 +229,14 @@ def status() -> None:
         raise _fail(err.message) from err
     if progress is None:
         raise _fail(NO_RUN_MESSAGE)
-    typer.echo(render_quick_status(data, progress) if progress.mode == "quick" else render_status(progress))
+    rich_render_status(progress, data=data)
 
 
 @app.command()
 def cancel() -> None:
     """Cleanly stop an in-progress run after its current phase."""
     from foundry.cancel import request_cancel
+    from foundry.console import console
 
     try:
         requested = request_cancel(Path.cwd())
@@ -200,4 +244,4 @@ def cancel() -> None:
         raise _fail(err.message) from err
     if not requested:
         raise _fail("No run in progress.")
-    typer.echo("Cancel requested. The run will stop after the current phase.")
+    console.print("Cancel requested. The run will stop after the current phase.")

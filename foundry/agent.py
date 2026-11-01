@@ -17,6 +17,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+import foundry.console as foundry_console
 from foundry.context import (
     CodeFailure,
     EnvFailure,
@@ -63,6 +64,10 @@ def print_to_terminal(text: str) -> None:
     sys.stdout.flush()
 
 
+def _default_on_text(text: str) -> None:
+    foundry_console.print_agent_chunk("agent", text)
+
+
 def classify_agent_failure(detail: str, status: int | None = None) -> FoundryError:
     """Infrastructure for rate limits / 5xx / network; environment for everything else."""
     if status is not None and (status == 429 or status >= 500):
@@ -76,7 +81,7 @@ class ClaudeCodeRunner:
     def __init__(
         self,
         command: Sequence[str] = ("claude",),
-        on_text: Callable[[str], None] = print_to_terminal,
+        on_text: Callable[[str], None] = _default_on_text,
         timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
         allowed_tools: Sequence[str] = DEFAULT_ALLOWED_TOOLS,
     ) -> None:
@@ -150,7 +155,7 @@ class ClaudeCodeRunner:
         stderr_task = asyncio.create_task(proc.stderr.read())  # type: ignore[union-attr]
         try:
             async with asyncio.timeout(self.timeout_seconds):
-                state = await self._consume(proc)
+                state = await self._consume(proc, request.name)
                 await proc.wait()
         except TimeoutError as exc:
             raise InfraFailure(
@@ -164,16 +169,16 @@ class ClaudeCodeRunner:
 
         return self._finish(request, proc.returncode or 0, state, stderr)
 
-    async def _consume(self, proc: asyncio.subprocess.Process) -> _StreamState:
+    async def _consume(self, proc: asyncio.subprocess.Process, agent_name: str = "agent") -> _StreamState:
         state = _StreamState()
         assert proc.stdout is not None
         while True:
             line = await proc.stdout.readline()
             if not line:
                 return state
-            self._handle_line(line.decode("utf-8", errors="replace").strip(), state)
+            self._handle_line(line.decode("utf-8", errors="replace").strip(), state, agent_name)
 
-    def _handle_line(self, line: str, state: _StreamState) -> None:
+    def _handle_line(self, line: str, state: _StreamState, agent_name: str = "agent") -> None:
         if not line:
             return
         try:
@@ -183,18 +188,24 @@ class ClaudeCodeRunner:
         if not isinstance(event, dict):
             return
 
+        def _forward(text: str) -> None:
+            if self.on_text is _default_on_text:
+                foundry_console.print_agent_chunk(agent_name, text)
+            else:
+                self.on_text(text)
+
         kind = event.get("type")
         if kind == "stream_event":
             delta = (event.get("event") or {}).get("delta") or {}
             if delta.get("type") == "text_delta" and delta.get("text"):
                 state.saw_deltas = True
                 state.streamed.append(delta["text"])
-                self.on_text(delta["text"])
+                _forward(delta["text"])
         elif kind == "assistant" and not state.saw_deltas:
             for block in (event.get("message") or {}).get("content") or []:
                 if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
                     state.streamed.append(block["text"])
-                    self.on_text(block["text"])
+                    _forward(block["text"])
         elif kind == "result":
             state.result = event
 
